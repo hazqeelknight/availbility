@@ -268,15 +268,15 @@ export const timeRangesOverlap = (
   start2: string,
   end2: string
 ): boolean => {
-  const [start1Hours, start1Minutes] = start1.split(':').map(Number);
-  const [end1Hours, end1Minutes] = end1.split(':').map(Number);
-  const [start2Hours, start2Minutes] = start2.split(':').map(Number);
-  const [end2Hours, end2Minutes] = end2.split(':').map(Number);
+  const [start1Hours, start1Mins] = start1.split(':').map(Number);
+  const [end1Hours, end1Mins] = end1.split(':').map(Number);
+  const [start2Hours, start2Mins] = start2.split(':').map(Number);
+  const [end2Hours, end2Mins] = end2.split(':').map(Number);
   
-  const start1Minutes = start1Hours * 60 + start1Minutes;
-  const end1Minutes = end1Hours * 60 + end1Minutes;
-  const start2Minutes = start2Hours * 60 + start2Minutes;
-  const end2Minutes = end2Hours * 60 + end2Minutes;
+  const start1TotalMinutes = start1Hours * 60 + start1Mins;
+  const end1TotalMinutes = end1Hours * 60 + end1Mins;
+  const start2TotalMinutes = start2Hours * 60 + start2Mins;
+  const end2TotalMinutes = end2Hours * 60 + end2Mins;
   
-  return start1Minutes < end2Minutes && end1Minutes > start2Minutes;
+  return start1TotalMinutes < end2TotalMinutes && end1TotalMinutes > start2TotalMinutes;
 };

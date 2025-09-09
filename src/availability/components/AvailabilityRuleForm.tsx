@@ -23,7 +23,7 @@ import { AdapterDateFns } from '@mui/x-date-pickers/AdapterDateFns';
 import { useForm, Controller } from 'react-hook-form';
 import { Button } from '@/components/core';
 import { useCreateAvailabilityRule, useUpdateAvailabilityRule } from '../hooks/useAvailabilityApi';
-import { formatTimeForInput, formatTimeForBackend, validateTimeRange, checkRuleOverlap, getWeekdayName, formatTimeForDisplay } from '../utils';
+import { formatTimeForInput, formatTimeForBackend, validateTimeRange, checkRuleOverlap, findOverlappingRule, getWeekdayName, formatTimeForDisplay } from '../utils';
 import type { AvailabilityRule, AvailabilityRuleFormData } from '../types';
 import { WEEKDAY_OPTIONS } from '../types';
 
@@ -32,6 +32,7 @@ interface AvailabilityRuleFormProps {
   onClose: () => void;
   rule?: AvailabilityRule;
   eventTypes?: Array<{ id: string; name: string }>;
+  existingRules?: AvailabilityRule[];
 }
 
 export const AvailabilityRuleForm: React.FC<AvailabilityRuleFormProps> = ({
@@ -39,6 +40,7 @@ export const AvailabilityRuleForm: React.FC<AvailabilityRuleFormProps> = ({
   onClose,
   rule,
   eventTypes = [],
+  existingRules = [],
 }) => {
   const createRule = useCreateAvailabilityRule();
   const updateRule = useUpdateAvailabilityRule();
@@ -61,6 +63,32 @@ export const AvailabilityRuleForm: React.FC<AvailabilityRuleFormProps> = ({
 
   const watchedStartTime = watch('start_time');
   const watchedEndTime = watch('end_time');
+  const watchedDayOfWeek = watch('day_of_week');
+
+  // Check for overlaps with existing rules
+  const isOverlapping = React.useMemo(() => {
+    if (!watchedStartTime || !watchedEndTime) return false;
+    
+    const newRuleData = {
+      day_of_week: watchedDayOfWeek,
+      start_time: watchedStartTime,
+      end_time: watchedEndTime,
+    };
+    
+    return checkRuleOverlap(newRuleData, existingRules, rule?.id);
+  }, [watchedDayOfWeek, watchedStartTime, watchedEndTime, existingRules, rule?.id]);
+
+  const overlappingRule = React.useMemo(() => {
+    if (!isOverlapping) return null;
+    
+    const newRuleData = {
+      day_of_week: watchedDayOfWeek,
+      start_time: watchedStartTime,
+      end_time: watchedEndTime,
+    };
+    
+    return findOverlappingRule(newRuleData, existingRules, rule?.id);
+  }, [isOverlapping, existingRules, watchedDayOfWeek, watchedStartTime, watchedEndTime, rule?.id]);
 
   React.useEffect(() => {
     if (rule) {
@@ -197,6 +225,15 @@ export const AvailabilityRuleForm: React.FC<AvailabilityRuleFormProps> = ({
                 </Grid>
               )}
 
+              {isOverlapping && overlappingRule && (
+                <Grid item xs={12}>
+                  <Alert severity="error">
+                    This time range overlaps with existing availability rule on {overlappingRule.day_of_week_display} 
+                    from {formatTimeForDisplay(overlappingRule.start_time)} to {formatTimeForDisplay(overlappingRule.end_time)}.
+                  </Alert>
+                </Grid>
+              )}
+
               <Grid item xs={12}>
                 <Controller
                   name="event_types"
@@ -259,6 +296,7 @@ export const AvailabilityRuleForm: React.FC<AvailabilityRuleFormProps> = ({
           onClick={handleSubmit(onSubmit)}
           variant="contained"
           loading={createRule.isPending || updateRule.isPending}
+          disabled={!!timeRangeError || isOverlapping}
         >
           {rule ? 'Update' : 'Create'}
         </Button>

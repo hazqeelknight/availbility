@@ -22,6 +22,7 @@ import { useForm, Controller } from 'react-hook-form';
 import { Button } from '@/components/core';
 import { useCreateRecurringBlockedTime, useUpdateRecurringBlockedTime } from '../hooks/useAvailabilityApi';
 import { formatTimeForInput, formatTimeForBackend, validateTimeRange } from '../utils';
+import { checkRuleOverlap } from '../utils';
 import type { RecurringBlockedTime, RecurringBlockedTimeFormData } from '../types';
 import { WEEKDAY_OPTIONS } from '../types';
 
@@ -29,12 +30,14 @@ interface RecurringBlockedTimeFormProps {
   open: boolean;
   onClose: () => void;
   recurringBlock?: RecurringBlockedTime;
+  existingRecurringBlocks?: RecurringBlockedTime[];
 }
 
 export const RecurringBlockedTimeForm: React.FC<RecurringBlockedTimeFormProps> = ({
   open,
   onClose,
   recurringBlock,
+  existingRecurringBlocks = [],
 }) => {
   const createRecurringBlock = useCreateRecurringBlockedTime();
   const updateRecurringBlock = useUpdateRecurringBlockedTime();
@@ -59,8 +62,43 @@ export const RecurringBlockedTimeForm: React.FC<RecurringBlockedTimeFormProps> =
 
   const watchedStartTime = watch('start_time');
   const watchedEndTime = watch('end_time');
+  const watchedDayOfWeek = watch('day_of_week');
   const watchedStartDate = watch('start_date');
   const watchedEndDate = watch('end_date');
+
+  // Check for overlaps with existing recurring blocks
+  const isOverlapping = React.useMemo(() => {
+    if (!watchedStartTime || !watchedEndTime) return false;
+    
+    const newBlockData = {
+      day_of_week: watchedDayOfWeek,
+      start_time: watchedStartTime,
+      end_time: watchedEndTime,
+      event_types: [], // Not relevant for recurring blocks
+      is_active: true,
+    };
+    
+    return checkRuleOverlap(newBlockData, existingRecurringBlocks, recurringBlock?.id);
+  }, [watchedDayOfWeek, watchedStartTime, watchedEndTime, existingRecurringBlocks, recurringBlock?.id]);
+
+  const overlappingBlock = React.useMemo(() => {
+    if (!isOverlapping) return null;
+    
+    return existingRecurringBlocks.find(block => {
+      if (recurringBlock?.id && block.id === recurringBlock.id) return false;
+      if (block.day_of_week !== watchedDayOfWeek) return false;
+      
+      const newBlockData = {
+        day_of_week: watchedDayOfWeek,
+        start_time: watchedStartTime,
+        end_time: watchedEndTime,
+        event_types: [],
+        is_active: true,
+      };
+      
+      return checkRuleOverlap(newBlockData, [block]);
+    });
+  }, [isOverlapping, existingRecurringBlocks, watchedDayOfWeek, watchedStartTime, watchedEndTime, recurringBlock?.id]);
 
   React.useEffect(() => {
     if (recurringBlock) {
@@ -225,6 +263,16 @@ export const RecurringBlockedTimeForm: React.FC<RecurringBlockedTimeFormProps> =
               )}
 
               <Grid item xs={12} md={6}>
+            {isOverlapping && overlappingBlock && (
+              <Grid item xs={12}>
+                <Alert severity="error">
+                  This time range overlaps with existing recurring block "{overlappingBlock.name}" 
+                  on {overlappingBlock.day_of_week_display} from {formatTimeForDisplay(overlappingBlock.start_time)} 
+                  to {formatTimeForDisplay(overlappingBlock.end_time)}.
+                </Alert>
+              </Grid>
+            )}
+
                 <Controller
                   name="start_date"
                   control={control}
@@ -303,16 +351,14 @@ export const RecurringBlockedTimeForm: React.FC<RecurringBlockedTimeFormProps> =
         <Button onClick={onClose} variant="outlined">
           Cancel
         </Button>
-        {canEdit && (
-          <Button
-            onClick={handleSubmit(onSubmit)}
-            variant="contained"
-            loading={createRecurringBlock.isPending || updateRecurringBlock.isPending}
-            disabled={!!timeRangeError || !!dateRangeError}
-          >
-            {recurringBlock ? 'Update' : 'Create'}
-          </Button>
-        )}
+        <Button
+          onClick={handleSubmit(onSubmit)}
+          variant="contained"
+          loading={createRecurringBlock.isPending || updateRecurringBlock.isPending}
+          disabled={!!timeRangeError || !!dateRangeError || isOverlapping}
+        >
+          {recurringBlock ? 'Update' : 'Create'}
+        </Button>
       </DialogActions>
     </Dialog>
   );

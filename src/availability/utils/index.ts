@@ -257,11 +257,11 @@ export const timeToMinutes = (timeString: string): number => {
 /**
  * Check if a new rule overlaps with existing rules
  */
-export const checkRuleOverlap = (
+export const checkRuleOverlap = <T extends { id: string; day_of_week: number; start_time: string; end_time: string; is_active?: boolean }>(
   newRule: { day_of_week: number; start_time: string; end_time: string },
-  existingRules: Array<{ id: string; day_of_week: number; start_time: string; end_time: string; is_active: boolean }>,
+  existingRules: T[],
   currentRuleId?: string
-): { hasOverlap: boolean; overlappingRule?: any } => {
+): boolean => {
   const newStartMinutes = timeToMinutes(newRule.start_time);
   const newEndMinutes = timeToMinutes(newRule.end_time);
   const newDay = newRule.day_of_week;
@@ -272,7 +272,8 @@ export const checkRuleOverlap = (
 
   for (const existingRule of existingRules) {
     // Skip the rule being edited and inactive rules
-    if ((currentRuleId && existingRule.id === currentRuleId) || !existingRule.is_active) {
+    if ((currentRuleId && existingRule.id === currentRuleId) || 
+        (existingRule.is_active !== undefined && !existingRule.is_active)) {
       continue;
     }
 
@@ -291,15 +292,55 @@ export const checkRuleOverlap = (
       const overlapEnd = Math.min(adjustedNewEndMinutes, adjustedExistingEndMinutes);
 
       if (overlapStart < overlapEnd) {
-        return {
-          hasOverlap: true,
-          overlappingRule: existingRule,
-        };
+        return true;
       }
     }
   }
 
-  return { hasOverlap: false };
+  return false;
+};
+
+/**
+ * Find the overlapping rule for detailed error messages
+ */
+export const findOverlappingRule = <T extends { id: string; day_of_week: number; start_time: string; end_time: string; is_active?: boolean }>(
+  newRule: { day_of_week: number; start_time: string; end_time: string },
+  existingRules: T[],
+  currentRuleId?: string
+): T | null => {
+  const newStartMinutes = timeToMinutes(newRule.start_time);
+  const newEndMinutes = timeToMinutes(newRule.end_time);
+  const newDay = newRule.day_of_week;
+
+  // Handle midnight spanning for new rule
+  const adjustedNewEndMinutes = newEndMinutes < newStartMinutes ? newEndMinutes + 24 * 60 : newEndMinutes;
+
+  for (const existingRule of existingRules) {
+    // Skip the rule being edited and inactive rules
+    if ((currentRuleId && existingRule.id === currentRuleId) || 
+        (existingRule.is_active !== undefined && !existingRule.is_active)) {
+      continue;
+    }
+
+    // Only check rules on the same day
+    if (existingRule.day_of_week === newDay) {
+      const existingStartMinutes = timeToMinutes(existingRule.start_time);
+      const existingEndMinutes = timeToMinutes(existingRule.end_time);
+
+      // Handle midnight spanning for existing rule
+      const adjustedExistingEndMinutes = existingEndMinutes < existingStartMinutes ? existingEndMinutes + 24 * 60 : existingEndMinutes;
+
+      // Check for overlap using interval intersection logic
+      const overlapStart = Math.max(newStartMinutes, existingStartMinutes);
+      const overlapEnd = Math.min(adjustedNewEndMinutes, adjustedExistingEndMinutes);
+
+      if (overlapStart < overlapEnd) {
+        return existingRule;
+      }
+    }
+  }
+
+  return null;
 };
 
 /**

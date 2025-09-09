@@ -227,6 +227,7 @@ const BlockedTimes: React.FC = () => {
           setEditingRecurring(undefined);
         }}
         recurringBlock={editingRecurring}
+        existingRecurringBlocks={recurringBlocks || []}
       />
 
       {/* Delete Confirmation Dialog */}

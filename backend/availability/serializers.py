@@ -1,4 +1,5 @@
 from rest_framework import serializers
+from django.db.models import Q
 from .models import AvailabilityRule, BlockedTime, BufferTime, DateOverrideRule, RecurringBlockedTime
 from .utils import validate_timezone
 
@@ -82,7 +83,59 @@ class RecurringBlockedTimeSerializer(serializers.ModelSerializer):
         if start_date and end_date and start_date > end_date:
             raise serializers.ValidationError("Start date must be before or equal to end date")
         
+        # Check for overlapping recurring blocks
+        organizer = self.context['request'].user
+        day_of_week = attrs.get('day_of_week')
+        start_time = attrs.get('start_time')
+        end_time = attrs.get('end_time')
+        
+        if organizer and day_of_week is not None and start_time and end_time:
+            # Get existing active recurring blocks for the same organizer and day
+            existing_blocks = RecurringBlockedTime.objects.filter(
+                organizer=organizer,
+                day_of_week=day_of_week,
+                is_active=True
+            )
+            
+            # Exclude current instance if updating
+            if self.instance:
+                existing_blocks = existing_blocks.exclude(id=self.instance.id)
+            
+            # Check for time overlaps
+            for existing_block in existing_blocks:
+                if self._time_ranges_overlap(start_time, end_time, existing_block.start_time, existing_block.end_time):
+                    raise serializers.ValidationError(
+                        f"This time range overlaps with existing recurring block '{existing_block.name}' "
+                        f"({existing_block.start_time} - {existing_block.end_time})"
+                    )
+        
         return attrs
+    
+    def _time_ranges_overlap(self, start1, end1, start2, end2):
+        """
+        Check if two time ranges overlap, handling midnight-spanning times.
+        
+        Args:
+            start1, end1: First time range (time objects)
+            start2, end2: Second time range (time objects)
+        
+        Returns:
+            bool: True if ranges overlap
+        """
+        # Convert times to minutes from midnight for easier comparison
+        start1_minutes = start1.hour * 60 + start1.minute
+        end1_minutes = end1.hour * 60 + end1.minute
+        start2_minutes = start2.hour * 60 + start2.minute
+        end2_minutes = end2.hour * 60 + end2.minute
+        
+        # Handle midnight-spanning ranges
+        if end1_minutes < start1_minutes:  # First range spans midnight
+            end1_minutes += 24 * 60
+        if end2_minutes < start2_minutes:  # Second range spans midnight
+            end2_minutes += 24 * 60
+        
+        # Check for overlap: (start1 < end2 AND end1 > start2)
+        return start1_minutes < end2_minutes and end1_minutes > start2_minutes
 
 
 class BlockedTimeSerializer(serializers.ModelSerializer):

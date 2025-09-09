@@ -34,8 +34,16 @@ const DateOverrides: React.FC = () => {
   const [deleteDialogOpen, setDeleteDialogOpen] = React.useState(false);
   const [deletingOverride, setDeletingOverride] = React.useState<DateOverrideRule | undefined>();
   const [tabValue, setTabValue] = React.useState(0);
+  const [formOpen, setFormOpen] = React.useState(false);
   const { data: eventTypes, isLoading: eventTypesLoading } = useEventTypes();
   const { data: eventTypes, isLoading: eventTypesLoading } = useEventTypes();
+
+  const handleCreate = () => {
+    setEditingOverride(undefined);
+    setFormOpen(true);
+  };
+
+  const handleEdit = (override: DateOverrideRule) => {
     setEditingOverride(override);
     setFormOpen(true);
   };
@@ -129,7 +137,7 @@ const DateOverrides: React.FC = () => {
         ) : (
           <Card>
             <CardContent>
-              <Box display="flex" justifyContent="between" alignItems="center" mb={2}>
+              <Box display="flex" justifyContent="space-between" alignItems="center" mb={2}>
                 <Typography variant="h6">
                   Date Overrides ({overrides.length} total)
                 </Typography>

@@ -1,6 +1,53 @@
 // Availability Module Utilities
 
 /**
+ * Canonical function for checking if two time intervals overlap.
+ * This mirrors the backend's are_time_intervals_overlapping function.
+ */
+export const areTimeIntervalsOverlapping = (
+  start1: string,
+  end1: string,
+  start2: string,
+  end2: string,
+  allowAdjacency: boolean = false
+): boolean => {
+  if (!start1 || !end1 || !start2 || !end2) {
+    return false;
+  }
+
+  try {
+    // Convert time strings to minutes from midnight
+    const start1Minutes = timeToMinutes(start1);
+    const end1Minutes = timeToMinutes(end1);
+    const start2Minutes = timeToMinutes(start2);
+    const end2Minutes = timeToMinutes(end2);
+
+    // Handle midnight-spanning intervals
+    let adjustedEnd1Minutes = end1Minutes;
+    let adjustedEnd2Minutes = end2Minutes;
+
+    if (end1Minutes < start1Minutes) {
+      adjustedEnd1Minutes = end1Minutes + 24 * 60;
+    }
+    if (end2Minutes < start2Minutes) {
+      adjustedEnd2Minutes = end2Minutes + 24 * 60;
+    }
+
+    // Check for overlap
+    if (allowAdjacency) {
+      // Adjacent intervals are considered overlapping
+      return start1Minutes <= adjustedEnd2Minutes && adjustedEnd1Minutes >= start2Minutes;
+    } else {
+      // Strict overlap only
+      return start1Minutes < adjustedEnd2Minutes && adjustedEnd1Minutes > start2Minutes;
+    }
+  } catch (error) {
+    console.error('Error parsing time strings in overlap check:', error);
+    return false;
+  }
+};
+
+/**
  * Format time string for display (HH:MM:SS -> HH:MM AM/PM)
  */
 export const formatTimeForDisplay = (timeString: string): string => {
@@ -262,14 +309,6 @@ export const checkRuleOverlap = <T extends { id: string; day_of_week: number; st
   existingRules: T[],
   currentRuleId?: string
 ): boolean => {
-  const newStartMinutes = timeToMinutes(newRule.start_time);
-  const newEndMinutes = timeToMinutes(newRule.end_time);
-  const newDay = newRule.day_of_week;
-
-  // Handle midnight spanning for new rule
-  const newSpansMiddnight = newEndMinutes < newStartMinutes;
-  const adjustedNewEndMinutes = newSpansMiddnight ? newEndMinutes + 24 * 60 : newEndMinutes;
-
   for (const existingRule of existingRules) {
     // Skip the rule being edited and inactive rules
     if ((currentRuleId && existingRule.id === currentRuleId) || 
@@ -278,20 +317,15 @@ export const checkRuleOverlap = <T extends { id: string; day_of_week: number; st
     }
 
     // Only check rules on the same day
-    if (existingRule.day_of_week === newDay) {
-      const existingStartMinutes = timeToMinutes(existingRule.start_time);
-      const existingEndMinutes = timeToMinutes(existingRule.end_time);
-
-      // Handle midnight spanning for existing rule
-      const existingSpansMiddnight = existingEndMinutes < existingStartMinutes;
-      const adjustedExistingEndMinutes = existingSpansMiddnight ? existingEndMinutes + 24 * 60 : existingEndMinutes;
-
-      // Check for overlap using interval intersection logic
-      // Two intervals [a,b] and [c,d] overlap if: max(a,c) < min(b,d)
-      const overlapStart = Math.max(newStartMinutes, existingStartMinutes);
-      const overlapEnd = Math.min(adjustedNewEndMinutes, adjustedExistingEndMinutes);
-
-      if (overlapStart < overlapEnd) {
+    if (existingRule.day_of_week === newRule.day_of_week) {
+      // Use the canonical overlap function
+      if (areTimeIntervalsOverlapping(
+        newRule.start_time + ':00', // Add seconds if not present
+        newRule.end_time + ':00',
+        existingRule.start_time + ':00',
+        existingRule.end_time + ':00',
+        true // Allow adjacency for validation (prevent adjacent rules)
+      )) {
         return true;
       }
     }
@@ -308,13 +342,6 @@ export const findOverlappingRule = <T extends { id: string; day_of_week: number;
   existingRules: T[],
   currentRuleId?: string
 ): T | null => {
-  const newStartMinutes = timeToMinutes(newRule.start_time);
-  const newEndMinutes = timeToMinutes(newRule.end_time);
-  const newDay = newRule.day_of_week;
-
-  // Handle midnight spanning for new rule
-  const adjustedNewEndMinutes = newEndMinutes < newStartMinutes ? newEndMinutes + 24 * 60 : newEndMinutes;
-
   for (const existingRule of existingRules) {
     // Skip the rule being edited and inactive rules
     if ((currentRuleId && existingRule.id === currentRuleId) || 
@@ -323,18 +350,15 @@ export const findOverlappingRule = <T extends { id: string; day_of_week: number;
     }
 
     // Only check rules on the same day
-    if (existingRule.day_of_week === newDay) {
-      const existingStartMinutes = timeToMinutes(existingRule.start_time);
-      const existingEndMinutes = timeToMinutes(existingRule.end_time);
-
-      // Handle midnight spanning for existing rule
-      const adjustedExistingEndMinutes = existingEndMinutes < existingStartMinutes ? existingEndMinutes + 24 * 60 : existingEndMinutes;
-
-      // Check for overlap using interval intersection logic
-      const overlapStart = Math.max(newStartMinutes, existingStartMinutes);
-      const overlapEnd = Math.min(adjustedNewEndMinutes, adjustedExistingEndMinutes);
-
-      if (overlapStart < overlapEnd) {
+    if (existingRule.day_of_week === newRule.day_of_week) {
+      // Use the canonical overlap function
+      if (areTimeIntervalsOverlapping(
+        newRule.start_time + ':00', // Add seconds if not present
+        newRule.end_time + ':00',
+        existingRule.start_time + ':00',
+        existingRule.end_time + ':00',
+        true // Allow adjacency for validation
+      )) {
         return existingRule;
       }
     }

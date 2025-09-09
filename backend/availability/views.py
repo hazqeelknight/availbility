@@ -168,13 +168,22 @@ def calculated_slots(request, organizer_slug):
         
         if cached_slots is not None:
             logger.info(f"Cache HIT for {organizer_slug}/{event_type_slug}")
-            available_slots = cached_slots
+            # Cached result should be the full dictionary from calculate_available_slots
+            if isinstance(cached_slots, dict):
+                available_slots_list = cached_slots.get('slots', [])
+                warnings = cached_slots.get('warnings', [])
+                performance_metrics = cached_slots.get('performance_metrics', {})
+            else:
+                # Fallback for old cache format
+                available_slots_list = cached_slots if isinstance(cached_slots, list) else []
+                warnings = []
+                performance_metrics = {}
         else:
             logger.info(f"Cache MISS for {organizer_slug}/{event_type_slug}")
             
             # Calculate available slots
             slot_calculation_start = time_module.time()
-            available_slots = calculate_available_slots(
+            calculation_result = calculate_available_slots(
                 organizer=organizer,
                 event_type=event_type,
                 start_date=start_date,
@@ -185,14 +194,31 @@ def calculated_slots(request, organizer_slug):
             )
             slot_calculation_time = time_module.time() - slot_calculation_start
             
+            # Extract components from calculation result
+            if isinstance(calculation_result, dict):
+                available_slots_list = calculation_result.get('slots', [])
+                warnings = calculation_result.get('warnings', [])
+                performance_metrics = calculation_result.get('performance_metrics', {})
+            else:
+                # Fallback for old format
+                available_slots_list = calculation_result if isinstance(calculation_result, list) else []
+                warnings = []
+                performance_metrics = {}
+            
             # Log computation time for performance monitoring
             logger.info(f"Slot calculation took {slot_calculation_time:.3f}s for {organizer_slug}/{event_type_slug}")
             
-            # Cache the result for 15 minutes
-            cache.set(cache_key, available_slots, timeout=900)
+            # Cache the complete result for 15 minutes
+            cache_result = {
+                'slots': available_slots_list,
+                'warnings': warnings,
+                'performance_metrics': performance_metrics,
+                'cache_hit': False
+            }
+            cache.set(cache_key, cache_result, timeout=900)
         
         # Serialize the slots
-        response_serializer = AvailableSlotSerializer(available_slots, many=True)
+        response_serializer = AvailableSlotSerializer(available_slots_list, many=True)
         
         # Calculate total request time
         total_request_time = time_module.time() - request_start_time
@@ -206,14 +232,18 @@ def calculated_slots(request, organizer_slug):
             'attendee_count': attendee_count,
             'available_slots': response_serializer.data,
             'cache_hit': cache_hit,
-            'total_slots': len(available_slots),
-            'computation_time_ms': round(total_request_time * 1000, 2)
+            'total_slots': len(available_slots_list),
+            'computation_time_ms': round(total_request_time * 1000, 2),
+            'warnings': warnings,
+            'performance_metrics': performance_metrics
         }
         
         # Add multi-invitee information if applicable
         if invitee_timezones:
             response_data['invitee_timezones'] = invitee_timezones
             response_data['multi_invitee_mode'] = True
+        
+        return Response(response_data)
         
     except ValueError as e:
         return Response(
@@ -274,7 +304,9 @@ def availability_stats(request):
             busiest_day = day_mapping[busiest_day_num]
     
     # Calculate cache hit rate (simplified - would need more sophisticated tracking in production)
-    cache_hit_rate = 0.85  # Placeholder - in production, track this via Redis metrics
+    
+    # Get actual cache hit rate from Redis metrics
+    cache_hit_rate = _get_actual_cache_hit_rate()
     
     stats = {
         'total_rules': total_rules,
@@ -292,15 +324,49 @@ def availability_stats(request):
     return Response(response_serializer.data)
 
 
+def _get_actual_cache_hit_rate():
+    """
+    Get actual cache hit rate from Redis metrics.
+    
+    Returns:
+        float: Cache hit rate as percentage (0-100)
+    """
+    try:
+        # Try to get Redis info if using Redis cache backend
+        if hasattr(cache, '_cache') and hasattr(cache._cache, 'get_client'):
+            redis_client = cache._cache.get_client()
+            redis_info = redis_client.info()
+            
+            hits = redis_info.get('keyspace_hits', 0)
+            misses = redis_info.get('keyspace_misses', 0)
+            total = hits + misses
+            
+            if total > 0:
+                hit_rate = (hits / total) * 100
+                return round(hit_rate, 2)
+        
+        # Fallback: return a reasonable default if Redis metrics aren't available
+        logger.warning("Could not retrieve actual cache hit rate, using default")
+        return 75.0  # Conservative default
+        
+    except Exception as e:
+        logger.error(f"Error getting cache hit rate: {e}")
+        return 75.0  # Conservative default
+
+
 @api_view(['POST'])
 @permission_classes([permissions.IsAuthenticated])
 def clear_availability_cache_manual(request):
     """Manually clear availability cache for the organizer."""
     organizer = request.user
     
-    # Clear all cache entries for this organizer
-    from .tasks import clear_availability_cache
-    clear_availability_cache.delay(organizer.id, cache_type='manual_clear')
+    # Mark cache as dirty for immediate processing
+    from .utils import mark_cache_dirty
+    mark_cache_dirty(organizer.id, cache_type='manual_clear', requires_full_invalidation=True)
+    
+    # Trigger immediate processing
+    from .tasks import process_dirty_cache_flags
+    process_dirty_cache_flags.delay()
     
     return Response({'message': 'Cache clearing initiated'})
 

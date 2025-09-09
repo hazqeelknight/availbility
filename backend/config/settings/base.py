@@ -286,6 +286,15 @@ AVAILABILITY_REASONABLE_HOURS_END = config('AVAILABILITY_REASONABLE_HOURS_END', 
 AVAILABILITY_SLOT_INTERVAL_MINUTES = config('AVAILABILITY_SLOT_INTERVAL_MINUTES', default=15, cast=int)
 AVAILABILITY_CACHE_DEBOUNCE_SECONDS = config('AVAILABILITY_CACHE_DEBOUNCE_SECONDS', default=300, cast=int)  # 5 minutes
 
+# Cache invalidation settings
+AVAILABILITY_COMMON_TIMEZONES = [
+    'UTC', 'America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles',
+    'Europe/London', 'Europe/Paris', 'Europe/Berlin', 'Europe/Rome', 'Europe/Madrid',
+    'Asia/Tokyo', 'Asia/Shanghai', 'Asia/Kolkata', 'Asia/Dubai', 'Asia/Singapore',
+    'Australia/Sydney', 'Australia/Melbourne', 'Pacific/Auckland'
+]
+AVAILABILITY_COMMON_ATTENDEE_COUNTS = [1, 2, 3, 4, 5, 6, 8, 10, 15, 20]
+
 # Twilio Configuration (for SMS)
 TWILIO_ACCOUNT_SID = config('TWILIO_ACCOUNT_SID', default='')
 TWILIO_AUTH_TOKEN = config('TWILIO_AUTH_TOKEN', default='')

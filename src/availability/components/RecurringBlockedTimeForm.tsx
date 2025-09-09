@@ -21,8 +21,15 @@ import { AdapterDateFns } from '@mui/x-date-pickers/AdapterDateFns';
 import { useForm, Controller } from 'react-hook-form';
 import { Button } from '@/components/core';
 import { useCreateRecurringBlockedTime, useUpdateRecurringBlockedTime } from '../hooks/useAvailabilityApi';
-import { formatTimeForInput, formatTimeForBackend, validateTimeRange } from '../utils';
-import { checkRuleOverlap } from '../utils';
+import { 
+  formatTimeForInput, 
+  formatTimeForBackend, 
+  validateTimeRange,
+  checkRuleOverlap,
+  areTimeIntervalsOverlapping,
+  formatTimeForDisplay,
+  getWeekdayName
+} from '../utils';
 import type { RecurringBlockedTime, RecurringBlockedTimeFormData } from '../types';
 import { WEEKDAY_OPTIONS } from '../types';
 
@@ -255,8 +262,8 @@ export const RecurringBlockedTimeForm: React.FC<RecurringBlockedTimeFormProps> =
               </Grid>
 
               {timeRangeError && (
-                <Grid item xs={12}>
-                  <Alert severity="info">
+                    This time range overlaps with existing recurring block "{overlappingBlock.name}" 
+                    on {getWeekdayName(overlappingBlock.day_of_week)} from {formatTimeForDisplay(overlappingBlock.start_time)} 
                     This block spans midnight. This is allowed for overnight blocks.
                   </Alert>
                 </Grid>

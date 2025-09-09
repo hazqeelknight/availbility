@@ -23,7 +23,16 @@ import { AdapterDateFns } from '@mui/x-date-pickers/AdapterDateFns';
 import { useForm, Controller } from 'react-hook-form';
 import { Button } from '@/components/core';
 import { useCreateAvailabilityRule, useUpdateAvailabilityRule } from '../hooks/useAvailabilityApi';
-import { formatTimeForInput, formatTimeForBackend, validateTimeRange, checkRuleOverlap, findOverlappingRule, getWeekdayName, formatTimeForDisplay } from '../utils';
+import { 
+  formatTimeForInput, 
+  formatTimeForBackend, 
+  validateTimeRange, 
+  checkRuleOverlap, 
+  findOverlappingRule, 
+  getWeekdayName, 
+  formatTimeForDisplay,
+  areTimeIntervalsOverlapping 
+} from '../utils';
 import type { AvailabilityRule, AvailabilityRuleFormData } from '../types';
 import { WEEKDAY_OPTIONS } from '../types';
 
@@ -228,7 +237,7 @@ export const AvailabilityRuleForm: React.FC<AvailabilityRuleFormProps> = ({
               {isOverlapping && overlappingRule && (
                 <Grid item xs={12}>
                   <Alert severity="error">
-                    This time range overlaps with existing availability rule on {overlappingRule.day_of_week_display} 
+                    This time range overlaps with existing availability rule on {getWeekdayName(overlappingRule.day_of_week)} 
                     from {formatTimeForDisplay(overlappingRule.start_time)} to {formatTimeForDisplay(overlappingRule.end_time)}.
                   </Alert>
                 </Grid>

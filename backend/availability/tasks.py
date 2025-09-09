@@ -3,12 +3,131 @@ from django.core.cache import cache
 from django.utils import timezone
 from django.conf import settings
 from datetime import datetime, timedelta
-from .utils import calculate_available_slots, get_cache_key_for_availability, get_weekly_cache_keys_for_date_range, generate_cache_key_variations
+from .utils import (
+    calculate_available_slots, get_cache_key_for_availability, 
+    get_weekly_cache_keys_for_date_range, generate_cache_key_variations,
+    get_dirty_organizers, clear_dirty_flags, are_time_intervals_overlapping
+)
 from apps.users.models import User
 from apps.events.models import EventType
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+@shared_task
+def process_dirty_cache_flags():
+    """
+    Process dirty cache flags and perform batch invalidation.
+    
+    This task runs periodically (every 5 minutes) to process accumulated
+    dirty flags and perform efficient cache invalidation using wildcard patterns.
+    """
+    try:
+        dirty_organizer_ids = get_dirty_organizers()
+        
+        if not dirty_organizer_ids:
+            logger.debug("No dirty cache flags to process")
+            return "No dirty cache flags to process"
+        
+        processed_count = 0
+        
+        for organizer_id in dirty_organizer_ids:
+            try:
+                # Get dirty data for this organizer
+                organizer_dirty_key = f"dirty_cache:{organizer_id}"
+                dirty_data = cache.get(organizer_dirty_key)
+                
+                if not dirty_data:
+                    # Dirty flag was cleared by another process
+                    clear_dirty_flags(organizer_id)
+                    continue
+                
+                # Determine invalidation strategy based on changes
+                requires_full_invalidation = dirty_data.get('requires_full_invalidation', False)
+                changes = dirty_data.get('changes', [])
+                
+                if requires_full_invalidation:
+                    # Clear all cache for this organizer (buffer changes, event type changes)
+                    pattern = f"availability:{organizer_id}:*"
+                    _clear_cache_pattern(pattern)
+                    logger.info(f"Full cache invalidation for organizer {organizer_id}")
+                else:
+                    # Selective invalidation based on specific changes
+                    patterns_to_clear = set()
+                    
+                    for change in changes:
+                        cache_type = change.get('cache_type')
+                        
+                        if cache_type == 'availability_rule_change':
+                            # Clear cache for all event types, all future dates
+                            patterns_to_clear.add(f"availability:{organizer_id}:*")
+                            
+                        elif cache_type == 'date_override_change':
+                            affected_date = change.get('affected_date')
+                            if affected_date:
+                                # Clear cache for specific date range
+                                patterns_to_clear.add(f"availability:{organizer_id}:*:{affected_date}*")
+                                
+                        elif cache_type in ['blocked_time_change', 'recurring_block_change']:
+                            # Clear cache for affected date ranges
+                            start_date = change.get('start_date')
+                            end_date = change.get('end_date')
+                            if start_date:
+                                patterns_to_clear.add(f"availability:{organizer_id}:*:{start_date}*")
+                            if end_date and end_date != start_date:
+                                patterns_to_clear.add(f"availability:{organizer_id}:*:{end_date}*")
+                    
+                    # Clear all identified patterns
+                    for pattern in patterns_to_clear:
+                        _clear_cache_pattern(pattern)
+                    
+                    logger.info(f"Selective cache invalidation for organizer {organizer_id}: {len(patterns_to_clear)} patterns")
+                
+                # Trigger precomputation for future availability
+                precompute_availability_cache.delay(organizer_id, days_ahead=14)
+                
+                # Clear dirty flags
+                clear_dirty_flags(organizer_id)
+                processed_count += 1
+                
+            except Exception as e:
+                logger.error(f"Error processing dirty cache for organizer {organizer_id}: {e}")
+                continue
+        
+        logger.info(f"Processed dirty cache flags for {processed_count} organizers")
+        return f"Processed dirty cache flags for {processed_count} organizers"
+        
+    except Exception as e:
+        logger.error(f"Error in process_dirty_cache_flags: {e}")
+        return f"Error in process_dirty_cache_flags: {e}"
+
+
+def _clear_cache_pattern(pattern):
+    """
+    Clear cache keys matching a pattern.
+    
+    Args:
+        pattern: Redis key pattern (e.g., "availability:organizer_id:*")
+    """
+    try:
+        # Try to use django-redis delete_pattern if available
+        if hasattr(cache, 'delete_pattern'):
+            deleted_count = cache.delete_pattern(pattern)
+            logger.debug(f"Cleared {deleted_count} cache keys matching pattern: {pattern}")
+        else:
+            # Fallback: use keys() to find matching keys and delete them
+            # Note: This is less efficient but works with any cache backend
+            if hasattr(cache, 'keys'):
+                matching_keys = cache.keys(pattern)
+                if matching_keys:
+                    cache.delete_many(matching_keys)
+                    logger.debug(f"Cleared {len(matching_keys)} cache keys matching pattern: {pattern}")
+            else:
+                logger.warning(f"Cannot clear cache pattern {pattern}: cache backend doesn't support pattern deletion")
+                
+    except Exception as e:
+        logger.error(f"Error clearing cache pattern {pattern}: {e}")
 
 
 @shared_task
@@ -400,19 +519,41 @@ def _rules_overlap(rule1, rule2):
         # Check if any interval from rule1 overlaps with any interval from rule2
         for start1, end1 in intervals1:
             for start2, end2 in intervals2:
-                if start1 < end2 and end1 > start2:
+                if are_time_intervals_overlapping(
+                    start1.strftime('%H:%M:%S'), 
+                    end1.strftime('%H:%M:%S'),
+                    start2.strftime('%H:%M:%S'), 
+                    end2.strftime('%H:%M:%S'),
+                    allow_adjacency=True
+                ):
                     return True
         return False
     
     # Normal rules - check for time overlap
-    return (rule1.start_time < rule2.end_time and rule1.end_time > rule2.start_time)
+    return are_time_intervals_overlapping(
+        rule1.start_time.strftime('%H:%M:%S'),
+        rule1.end_time.strftime('%H:%M:%S'),
+        rule2.start_time.strftime('%H:%M:%S'),
+        rule2.end_time.strftime('%H:%M:%S'),
+        allow_adjacency=True
+def generate_cache_key_variations(base_key):
+
+    Generate variations of a cache key to handle different timezone/attendee combinations.
+    
+    Updated to use configurable timezone and attendee count lists from settings.
 def _get_rule_intervals(rule):
     """
     Get time intervals for a rule, splitting midnight-spanning rules.
     
     Returns:
-        List of (start_time, end_time) tuples
-    """
+    from django.conf import settings
+    
+    # Get timezone and attendee count variations from settings
+    common_timezones = getattr(settings, 'AVAILABILITY_COMMON_TIMEZONES', [
+        'UTC', 'America/New_York', 'Europe/London', 'Asia/Tokyo', 'America/Los_Angeles'
+    ])
+    attendee_counts = getattr(settings, 'AVAILABILITY_COMMON_ATTENDEE_COUNTS', [1, 2, 3, 4, 5])
+    
     if rule.spans_midnight():
         # Split into two intervals
         return [

@@ -20,7 +20,7 @@ import {
   useAvailabilityRules,
   useDeleteAvailabilityRule,
 } from '../hooks/useAvailabilityApi';
-import { sortAvailabilityRules } from '../utils';
+import { sortAvailabilityRules, getWeekdayName } from '../utils';
 import type { AvailabilityRule } from '../types';
 
 const AvailabilityRules: React.FC = () => {

@@ -36,9 +36,6 @@ export const availabilityRulesApi = {
       console.warn('API returned unexpected data structure for availability rules:', response.data);
       return [];
     }
-      console.warn('API returned unexpected data structure for availability rules:', response.data);
-      return [];
-    }
   },
 
   getById: async (id: string): Promise<AvailabilityRule> => {
@@ -72,9 +69,6 @@ export const dateOverrideRulesApi = {
       // Fallback for non-paginated responses
       return response.data;
     } else {
-      console.warn('API returned unexpected data structure for date override rules:', response.data);
-      return [];
-    }
       console.warn('API returned unexpected data structure for date override rules:', response.data);
       return [];
     }
@@ -114,9 +108,6 @@ export const recurringBlockedTimesApi = {
       console.warn('API returned unexpected data structure for recurring blocked times:', response.data);
       return [];
     }
-      console.warn('API returned unexpected data structure for recurring blocked times:', response.data);
-      return [];
-    }
   },
 
   getById: async (id: string): Promise<RecurringBlockedTime> => {
@@ -150,9 +141,6 @@ export const blockedTimesApi = {
       // Fallback for non-paginated responses
       return response.data;
     } else {
-      console.warn('API returned unexpected data structure for blocked times:', response.data);
-      return [];
-    }
       console.warn('API returned unexpected data structure for blocked times:', response.data);
       return [];
     }

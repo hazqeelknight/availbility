@@ -286,6 +286,22 @@ AVAILABILITY_REASONABLE_HOURS_END = config('AVAILABILITY_REASONABLE_HOURS_END', 
 AVAILABILITY_SLOT_INTERVAL_MINUTES = config('AVAILABILITY_SLOT_INTERVAL_MINUTES', default=15, cast=int)
 AVAILABILITY_CACHE_DEBOUNCE_SECONDS = config('AVAILABILITY_CACHE_DEBOUNCE_SECONDS', default=300, cast=int)  # 5 minutes
 
+# Cache invalidation settings - configurable timezone and attendee count lists
+AVAILABILITY_COMMON_TIMEZONES = config(
+    'AVAILABILITY_COMMON_TIMEZONES',
+    default='UTC,America/New_York,America/Chicago,America/Denver,America/Los_Angeles,Europe/London,Europe/Paris,Europe/Berlin,Asia/Tokyo,Asia/Shanghai,Asia/Kolkata,Australia/Sydney',
+    cast=lambda v: [tz.strip() for tz in v.split(',')]
+)
+AVAILABILITY_COMMON_ATTENDEE_COUNTS = config(
+    'AVAILABILITY_COMMON_ATTENDEE_COUNTS', 
+    default='1,2,3,4,5,6,8,10,15,20',
+    cast=lambda v: [int(count.strip()) for count in v.split(',')]
+)
+
+# Slot merging settings
+AVAILABILITY_SLOT_MERGE_STRICT_ADJACENCY = config('AVAILABILITY_SLOT_MERGE_STRICT_ADJACENCY', default=True, cast=bool)
+AVAILABILITY_SLOT_MERGE_GAP_TOLERANCE_MINUTES = config('AVAILABILITY_SLOT_MERGE_GAP_TOLERANCE_MINUTES', default=0, cast=int)
+
 # Cache invalidation settings
 AVAILABILITY_COMMON_TIMEZONES = [
     'UTC', 'America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles',

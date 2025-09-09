@@ -43,14 +43,15 @@ class AvailabilityRuleSerializer(serializers.ModelSerializer):
             if self.instance:
                 existing_rules = existing_rules.exclude(id=self.instance.id)
             
-            # Check for time overlaps
+            # Check for time overlaps using canonical function
             for existing_rule in existing_rules:
+                from .utils import are_time_intervals_overlapping
                 if are_time_intervals_overlapping(
                     start_time.strftime('%H:%M:%S'), 
                     end_time.strftime('%H:%M:%S'),
                     existing_rule.start_time.strftime('%H:%M:%S'), 
                     existing_rule.end_time.strftime('%H:%M:%S'),
-                    allow_adjacency=True  # Prevent adjacent rules for validation
+                    allow_adjacency=True  # Prevent adjacent rules to encourage consolidation
                 ):
                     raise serializers.ValidationError(
                         f"This time range overlaps with existing availability rule on {existing_rule.get_day_of_week_display()} "
@@ -116,7 +117,7 @@ class RecurringBlockedTimeSerializer(serializers.ModelSerializer):
         # Check for overlapping recurring blocks
         organizer = self.context['request'].user
         day_of_week = attrs.get('day_of_week')
-        start_time = attrs.get('start_time')
+        start_time = attrs.get('start_time') 
         end_time = attrs.get('end_time')
         
         if organizer and day_of_week is not None and start_time and end_time:
@@ -131,18 +132,19 @@ class RecurringBlockedTimeSerializer(serializers.ModelSerializer):
             if self.instance:
                 existing_blocks = existing_blocks.exclude(id=self.instance.id)
             
-            # Check for time overlaps
+            # Check for time overlaps using canonical function
             for existing_block in existing_blocks:
+                from .utils import are_time_intervals_overlapping
                 if are_time_intervals_overlapping(
                     start_time.strftime('%H:%M:%S'), 
                     end_time.strftime('%H:%M:%S'),
                     existing_block.start_time.strftime('%H:%M:%S'), 
                     existing_block.end_time.strftime('%H:%M:%S'),
-                    allow_adjacency=True  # Prevent adjacent blocks for validation
+                    allow_adjacency=True  # Prevent adjacent blocks to encourage consolidation
                 ):
                     raise serializers.ValidationError(
                         f"This time range overlaps with existing recurring block '{existing_block.name}' "
-                        f"({existing_block.start_time} - {existing_block.end_time})"
+                        f"({existing_block.start_time.strftime('%H:%M')} - {existing_block.end_time.strftime('%H:%M')})"
                     )
         
         return attrs

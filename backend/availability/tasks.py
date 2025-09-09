@@ -48,41 +48,68 @@ def process_dirty_cache_flags():
                 changes = dirty_data.get('changes', [])
                 
                 if requires_full_invalidation:
-                    # Clear all cache for this organizer (buffer changes, event type changes)
-                    pattern = f"availability:{organizer_id}:*"
-                    _clear_cache_pattern(pattern)
+                    # Clear all cache for this organizer using pattern-based invalidation
+                    patterns = generate_cache_key_patterns_for_invalidation(organizer_id)
+                    total_cleared = 0
+                    for pattern in patterns:
+                        cleared = _clear_cache_pattern(pattern)
+                        total_cleared += cleared
                     logger.info(f"Full cache invalidation for organizer {organizer_id}")
                 else:
-                    # Selective invalidation based on specific changes
-                    patterns_to_clear = set()
+                    # Selective invalidation based on specific changes using new pattern system
+                    total_cleared = 0
                     
                     for change in changes:
                         cache_type = change.get('cache_type')
+                        event_type_id = change.get('event_type_id')
                         
                         if cache_type == 'availability_rule_change':
                             # Clear cache for all event types, all future dates
-                            patterns_to_clear.add(f"availability:{organizer_id}:*")
+                            patterns = generate_cache_key_patterns_for_invalidation(organizer_id)
                             
                         elif cache_type == 'date_override_change':
                             affected_date = change.get('affected_date')
                             if affected_date:
-                                # Clear cache for specific date range
-                                patterns_to_clear.add(f"availability:{organizer_id}:*:{affected_date}*")
+                                # Clear cache for specific date
+                                date_obj = datetime.fromisoformat(affected_date).date()
+                                patterns = generate_cache_key_patterns_for_invalidation(
+                                    organizer_id, 
+                                    date_range=(date_obj, date_obj)
+                                )
+                            else:
+                                patterns = generate_cache_key_patterns_for_invalidation(organizer_id)
                                 
                         elif cache_type in ['blocked_time_change', 'recurring_block_change']:
                             # Clear cache for affected date ranges
                             start_date = change.get('start_date')
                             end_date = change.get('end_date')
-                            if start_date:
-                                patterns_to_clear.add(f"availability:{organizer_id}:*:{start_date}*")
-                            if end_date and end_date != start_date:
-                                patterns_to_clear.add(f"availability:{organizer_id}:*:{end_date}*")
+                            if start_date and end_date:
+                                start_date_obj = datetime.fromisoformat(start_date).date()
+                                end_date_obj = datetime.fromisoformat(end_date).date()
+                                patterns = generate_cache_key_patterns_for_invalidation(
+                                    organizer_id,
+                                    date_range=(start_date_obj, end_date_obj)
+                                )
+                            else:
+                                patterns = generate_cache_key_patterns_for_invalidation(organizer_id)
+                        
+                        elif cache_type == 'event_type_change':
+                            # Clear cache for specific event type
+                            patterns = generate_cache_key_patterns_for_invalidation(
+                                organizer_id, 
+                                event_type_id=event_type_id
+                            )
+                        
+                        else:
+                            # Unknown change type - clear all for safety
+                            patterns = generate_cache_key_patterns_for_invalidation(organizer_id)
                     
-                    # Clear all identified patterns
-                    for pattern in patterns_to_clear:
-                        _clear_cache_pattern(pattern)
+                        # Clear all patterns for this change
+                        for pattern in patterns:
+                            cleared = _clear_cache_pattern(pattern)
+                            total_cleared += cleared
                     
-                    logger.info(f"Selective cache invalidation for organizer {organizer_id}: {len(patterns_to_clear)} patterns")
+                    logger.info(f"Selective cache invalidation for organizer {organizer_id}: {total_cleared} keys cleared")
                 
                 # Trigger precomputation for future availability
                 precompute_availability_cache.delay(organizer_id, days_ahead=14)
@@ -113,21 +140,40 @@ def _clear_cache_pattern(pattern):
     try:
         # Try to use django-redis delete_pattern if available
         if hasattr(cache, 'delete_pattern'):
-            deleted_count = cache.delete_pattern(pattern)
-            logger.debug(f"Cleared {deleted_count} cache keys matching pattern: {pattern}")
-        else:
-            # Fallback: use keys() to find matching keys and delete them
-            # Note: This is less efficient but works with any cache backend
-            if hasattr(cache, 'keys'):
+            try:
+                deleted_count = cache.delete_pattern(pattern)
+                logger.debug(f"Cleared {deleted_count} cache keys matching pattern: {pattern}")
+                return deleted_count
+            except Exception as e:
+                logger.warning(f"delete_pattern failed for {pattern}: {e}, falling back to manual deletion")
+        
+        # Fallback: use keys() to find matching keys and delete them
+        if hasattr(cache, 'keys'):
+            try:
                 matching_keys = cache.keys(pattern)
                 if matching_keys:
-                    cache.delete_many(matching_keys)
-                    logger.debug(f"Cleared {len(matching_keys)} cache keys matching pattern: {pattern}")
-            else:
-                logger.warning(f"Cannot clear cache pattern {pattern}: cache backend doesn't support pattern deletion")
+                    # Delete in batches to avoid memory issues with large key sets
+                    batch_size = 1000
+                    deleted_count = 0
+                    for i in range(0, len(matching_keys), batch_size):
+                        batch = matching_keys[i:i + batch_size]
+                        cache.delete_many(batch)
+                        deleted_count += len(batch)
+                    logger.debug(f"Cleared {deleted_count} cache keys matching pattern: {pattern}")
+                    return deleted_count
+                else:
+                    logger.debug(f"No cache keys found matching pattern: {pattern}")
+                    return 0
+            except Exception as e:
+                logger.error(f"Error using cache.keys() for pattern {pattern}: {e}")
+                return 0
+        else:
+            logger.warning(f"Cannot clear cache pattern {pattern}: cache backend doesn't support pattern deletion or keys()")
+            return 0
                 
     except Exception as e:
         logger.error(f"Error clearing cache pattern {pattern}: {e}")
+        return 0
 
 
 @shared_task
@@ -536,29 +582,46 @@ def _rules_overlap(rule1, rule2):
         rule2.start_time.strftime('%H:%M:%S'),
         rule2.end_time.strftime('%H:%M:%S'),
         allow_adjacency=True
-def generate_cache_key_variations(base_key):
-
-    Generate variations of a cache key to handle different timezone/attendee combinations.
-    
-    Updated to use configurable timezone and attendee count lists from settings.
-def _get_rule_intervals(rule):
+def generate_cache_key_patterns_for_invalidation(organizer_id, event_type_id=None, date_range=None):
     """
-    Get time intervals for a rule, splitting midnight-spanning rules.
+    Generate cache key patterns for wildcard invalidation.
+    
+    This replaces the flawed generate_cache_key_variations approach with
+    pattern-based invalidation that doesn't rely on hardcoded lists.
+    
+    Args:
+        organizer_id: UUID of the organizer
+        event_type_id: UUID of the event type (optional, None for all event types)
+        date_range: tuple of (start_date, end_date) (optional, None for all dates)
     
     Returns:
-    from django.conf import settings
+        List of Redis key patterns for deletion
+    """
+    patterns = []
     
-    # Get timezone and attendee count variations from settings
-    common_timezones = getattr(settings, 'AVAILABILITY_COMMON_TIMEZONES', [
-        'UTC', 'America/New_York', 'Europe/London', 'Asia/Tokyo', 'America/Los_Angeles'
-    ])
-    attendee_counts = getattr(settings, 'AVAILABILITY_COMMON_ATTENDEE_COUNTS', [1, 2, 3, 4, 5])
+    if event_type_id and date_range:
+        # Most specific: organizer + event type + date range
+        start_date, end_date = date_range
+        current_date = start_date
+        while current_date <= end_date:
+            date_str = current_date.isoformat()
+            patterns.append(f"availability:{organizer_id}:{event_type_id}:{date_str}*")
+            current_date += timedelta(days=1)
+    elif event_type_id:
+        # Organizer + specific event type, all dates
+        patterns.append(f"availability:{organizer_id}:{event_type_id}:*")
+    elif date_range:
+        # Organizer + all event types + specific date range
+        start_date, end_date = date_range
+        current_date = start_date
+        while current_date <= end_date:
+            date_str = current_date.isoformat()
+            patterns.append(f"availability:{organizer_id}:*:{date_str}*")
+            current_date += timedelta(days=1)
+    else:
+        # Broadest: all cache for this organizer
+        patterns.append(f"availability:{organizer_id}:*")
     
-    if rule.spans_midnight():
-        # Split into two intervals
-        return [
-            (rule.start_time, time(23, 59, 59)),  # Before midnight
-            (time(0, 0), rule.end_time)           # After midnight
-        ]
+    return patterns
     else:
         return [(rule.start_time, rule.end_time)]

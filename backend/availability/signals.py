@@ -71,7 +71,8 @@ def invalidate_cache_on_buffer_time_change(sender, instance, **kwargs):
     logger.info(f"Buffer time settings changed for {instance.organizer.email}, clearing cache")
     mark_cache_dirty(
         instance.organizer.id,
-        cache_type='buffer_time_change'
+        cache_type='buffer_time_change',
+        requires_full_invalidation=True  # Buffer changes affect all calculations
     )
 
 
@@ -123,7 +124,8 @@ def invalidate_cache_on_event_type_change(sender, instance, **kwargs):
             cache_type='event_type_change',
             event_type_id=str(instance.id),
             changed_fields=changed_fields,
-            previous_values=previous_values
+            previous_values=previous_values,
+            requires_full_invalidation=False  # Event type changes are type-specific
         )
         
         # Clean up the temporary attribute

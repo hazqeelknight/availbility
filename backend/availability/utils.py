@@ -128,13 +128,27 @@ def get_external_busy_times(organizer, start_date, end_date):
         )
         
         for integration in calendar_integrations:
+            # Get busy times from this integration with specific error handling
             try:
-                if integration.provider == 'google':
-                    from apps.integrations.google_client import GoogleCalendarClient
-                    client = GoogleCalendarClient(integration)
-                    events = client.get_busy_times(start_date, end_date)
-                elif integration.provider == 'outlook':
-                    from apps.integrations.outlook_client import OutlookCalendarClient
+                integration_busy_times = integration.get_busy_times(start_date, end_date)
+                if integration_busy_times:
+                    busy_times.extend(integration_busy_times)
+            except (ConnectionError, TimeoutError) as e:
+                logger.warning(f"Network error fetching busy times from {integration.provider}: {e}")
+                # Continue with other integrations
+                continue
+            except ValueError as e:
+                logger.error(f"Invalid data from {integration.provider}: {e}")
+                # Continue with other integrations
+                continue
+            except AttributeError as e:
+                logger.error(f"Integration method error for {integration.provider}: {e}")
+                # Continue with other integrations
+                continue
+            except Exception as e:
+                logger.error(f"Unexpected error fetching busy times from {integration.provider}: {e}")
+                # Continue with other integrations - don't let one bad integration break everything
+                continue
                     client = OutlookCalendarClient(integration)
                     events = client.get_busy_times(start_date, end_date)
                 else:
@@ -164,8 +178,12 @@ def get_external_busy_times(organizer, start_date, end_date):
         
         return busy_times
         
+    except ImportError:
+        # Integrations module not available
+        logger.debug("Calendar integrations module not available")
+        return []
     except Exception as e:
-        logger.error(f"Error getting external busy times: {str(e)}")
+        logger.error(f"Unexpected error getting external busy times: {e}")
         return []
 
 
@@ -206,45 +224,80 @@ def calculate_available_slots(organizer, event_type, start_date, end_date, invit
         invitee_timezone: IANA timezone string (primary invitee)
         attendee_count: Number of attendees for this booking (default: 1)
         invitee_timezones: List of IANA timezone strings for multi-invitee scheduling
-    
-    Returns:
-        Dict with 'slots', 'warnings', and performance metrics
-    """
-    with PerformanceProfiler(f"calculate_available_slots for {organizer.email}") as profiler:
-        warnings = []
+    try:
+        # Get buffer times for this event type (with fallback to organizer defaults)
+        buffer_before = getattr(event_type, 'buffer_time_before', None)
+        buffer_after = getattr(event_type, 'buffer_time_after', None)
         
-        # Validate timezone strings
-        if not validate_timezone(invitee_timezone):
-            raise ValueError(f"Invalid timezone: {invitee_timezone}")
+        # If event type doesn't have specific buffers, use organizer defaults
+        if buffer_before is None or buffer_after is None:
+            try:
+                buffer_settings = event_type.organizer.buffer_settings
+                buffer_before = buffer_before if buffer_before is not None else buffer_settings.default_buffer_before
+                buffer_after = buffer_after if buffer_after is not None else buffer_settings.default_buffer_after
+            except AttributeError:
+                # No buffer settings found, use zero
+                buffer_before = buffer_before or 0
+                buffer_after = buffer_after or 0
         
-        if invitee_timezones:
-            valid_timezones = []
-            for tz in invitee_timezones:
-                if validate_timezone(tz):
-                    valid_timezones.append(tz)
-                else:
-                    warnings.append(f"Invalid timezone '{tz}' was skipped")
-                    logger.warning(f"Invalid timezone '{tz}' provided for multi-invitee scheduling")
-            invitee_timezones = valid_timezones
+        # Apply buffer times to the slot
+        buffered_start = start_time - timedelta(minutes=buffer_before)
+        buffered_end = end_time + timedelta(minutes=buffer_after)
         
-        profiler.checkpoint('timezone_validation')
+        # Get all bookings that overlap with the buffered time range
+        overlapping_bookings = existing_bookings.filter(
+            start_time__lt=buffered_end,
+            end_time__gt=buffered_start,
+            status__in=['confirmed', 'rescheduled']  # Include rescheduled as they still block time
+        )
         
-        # Check cache first
-        cache_key = f"availability:{organizer.id}:{event_type.id}:{start_date}:{end_date}:{invitee_timezone}:{attendee_count}"
-        cached_result = cache.get(cache_key)
+        # If no overlapping bookings, slot is available
+        if not overlapping_bookings.exists():
+            return False
         
-        if cached_result and not is_cache_dirty_for_organizer(organizer.id):
-            profiler.checkpoint('cache_hit')
-            cached_result['performance_metrics'] = profiler.metrics
-            cached_result['cache_hit'] = True
-            return cached_result
-    
-        # Get organizer's timezone
-        organizer_timezone = organizer.profile.timezone_name
+        # Group overlapping bookings by event type for capacity analysis
+        event_type_bookings = {}
+        for booking in overlapping_bookings:
+            et_id = booking.event_type.id
+            if et_id not in event_type_bookings:
+                event_type_bookings[et_id] = []
+            event_type_bookings[et_id].append(booking)
         
-        # Get availability rules that apply to this event type
-        availability_rules = AvailabilityRule.objects.filter(
-            organizer=organizer,
+        # Check conflicts for each event type
+        for et_id, bookings in event_type_bookings.items():
+            booking_event_type = bookings[0].event_type
+            
+            # If it's a different event type, any overlap is a conflict
+            if et_id != event_type.id:
+                return True
+            
+            # Same event type - check if it's a group event
+            if hasattr(booking_event_type, 'max_attendees') and booking_event_type.max_attendees > 1:
+                # For group events, check capacity across ALL overlapping bookings
+                total_confirmed_attendees = 0
+                
+                for booking in bookings:
+                    # Check if this booking actually overlaps with our slot (not just the buffered range)
+                    if (booking.start_time < end_time and booking.end_time > start_time):
+                        total_confirmed_attendees += booking.attendee_count
+                
+                # Check if adding new attendees would exceed capacity
+                if (total_confirmed_attendees + attendee_count) > booking_event_type.max_attendees:
+                    return True
+                
+                # If there's still capacity, continue checking other event types
+                continue
+            else:
+                # For non-group events of the same type, any overlap is a conflict
+                return True
+        
+        # No conflicts found after checking all overlapping bookings
+        return False
+        
+    except Exception as e:
+        logger.error(f"Error checking booking conflicts: {e}")
+        # Fail safe: assume conflict to prevent double-booking
+        return True
             is_active=True
         ).filter(
             models.Q(event_types__isnull=True) | models.Q(event_types=event_type)
@@ -407,8 +460,76 @@ def is_cache_dirty_for_organizer(organizer_id):
     Returns:
         bool: True if cache is marked as dirty
     """
-    dirty_key = f"dirty_cache:{organizer_id}"
-    dirty_data = cache.get(dirty_key)
+    try:
+        dirty_key = f"dirty_cache:{organizer_id}"
+        
+        # Get existing dirty data or create new
+        existing_dirty_data = cache.get(dirty_key, {
+            'requires_full_invalidation': False,
+            'changes': [],
+            'first_marked_at': timezone.now().isoformat(),
+        })
+        
+        # Update dirty data
+        if requires_full_invalidation:
+            existing_dirty_data['requires_full_invalidation'] = True
+        
+        # Add this change to the list
+        change_record = {
+            'cache_type': cache_type,
+            'timestamp': timezone.now().isoformat(),
+            **kwargs
+        }
+        existing_dirty_data['changes'].append(change_record)
+        
+        # Store updated dirty data with extended timeout
+        cache.set(dirty_key, existing_dirty_data, timeout=7200)  # 2 hours
+        
+        logger.debug(f"Marked cache dirty for organizer {organizer_id}: {cache_type}")
+        
+    except Exception as e:
+        logger.error(f"Error marking cache dirty for organizer {organizer_id}: {e}")
+
+
+def get_dirty_organizers():
+    """
+    Get list of organizer IDs that have dirty cache flags.
+    
+    Returns:
+        List of organizer UUIDs that need cache processing
+    """
+    try:
+        # This requires django-redis or a cache backend that supports pattern matching
+        if hasattr(cache, 'keys'):
+            dirty_keys = cache.keys('dirty_cache:*')
+            organizer_ids = []
+            for key in dirty_keys:
+                # Extract organizer ID from key like 'dirty_cache:uuid'
+                if isinstance(key, str) and key.startswith('dirty_cache:'):
+                    organizer_id = key.replace('dirty_cache:', '')
+                    organizer_ids.append(organizer_id)
+            return organizer_ids
+        else:
+            logger.warning("Cache backend doesn't support keys() - cannot get dirty organizers")
+            return []
+    except Exception as e:
+        logger.error(f"Error getting dirty organizers: {e}")
+        return []
+
+
+def clear_dirty_flags(organizer_id):
+    """
+    Clear dirty cache flags for an organizer after processing.
+    
+    Args:
+        organizer_id: UUID of the organizer
+    """
+    try:
+        dirty_key = f"dirty_cache:{organizer_id}"
+        cache.delete(dirty_key)
+        logger.debug(f"Cleared dirty flags for organizer {organizer_id}")
+    except Exception as e:
+        logger.error(f"Error clearing dirty flags for organizer {organizer_id}: {e}")
     return dirty_data is not None
 
 
@@ -678,7 +799,7 @@ def is_slot_blocked_by_recurring(start_time, end_time, recurring_blocks, organiz
 def is_slot_conflicting_with_bookings(start_time, end_time, existing_bookings, event_type, attendee_count=1, 
                                      buffer_before=None, buffer_after=None):
     """
-    Check if a time slot conflicts with existing bookings across ALL event types.
+    Check if a time slot conflicts with existing bookings with robust capacity handling.
     
     Args:
         start_time: Proposed slot start time (UTC datetime)
@@ -805,7 +926,7 @@ def _get_available_spots_for_slot(event_type, start_time, end_time, existing_boo
 
 def merge_overlapping_slots(slots):
     """
-    Merge overlapping or adjacent slots into continuous blocks.
+    Merge overlapping or strictly adjacent time slots.
     
     Uses strict adjacency (no arbitrary fudge factors) for precise scheduling.
     """
@@ -819,7 +940,7 @@ def merge_overlapping_slots(slots):
     current_slot = sorted_slots[0].copy()
     
     for next_slot in sorted_slots[1:]:
-        # Check if slots are adjacent or overlapping (strict adjacency, no fudge factor)
+        # Check if slots are strictly adjacent or overlapping
         if current_slot['end_time'] >= next_slot['start_time']:
             # Merge slots
             current_slot['end_time'] = max(current_slot['end_time'], next_slot['end_time'])
@@ -1130,13 +1251,14 @@ def find_optimal_slots_for_group(organizer_slots, invitee_timezones, max_slots=1
 def mark_cache_dirty(organizer_id, cache_type, **kwargs):
     """
     Mark cache as dirty for debounced batch invalidation processing.
-    
+def mark_cache_dirty(organizer_id, cache_type='general', requires_full_invalidation=False, **kwargs):
     This replaces direct cache clearing to prevent race conditions and
-    enable more efficient batch processing of cache invalidations.
+    Mark cache as dirty for an organizer with detailed change tracking.
     
     Args:
         organizer_id: UUID of the organizer
         cache_type: Type of change that triggered the dirty flag
+        requires_full_invalidation: Whether this change requires full cache invalidation
         **kwargs: Additional parameters for specific dirty flag types
     """
     # Use a global dirty set to track all organizers with dirty cache

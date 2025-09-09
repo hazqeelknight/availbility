@@ -44,7 +44,12 @@ class AvailabilityRule(models.Model):
         db_table = 'availability_rules'
         verbose_name = 'Availability Rule'
         verbose_name_plural = 'Availability Rules'
-        unique_together = ['organizer', 'day_of_week', 'start_time', 'end_time']
+        # Remove unique_together to allow more flexible rule management
+        # Overlap validation is handled in serializers and business logic
+        indexes = [
+            models.Index(fields=['organizer', 'day_of_week', 'is_active']),
+            models.Index(fields=['organizer', 'is_active']),
+        ]
     
     def __str__(self):
         return f"{self.organizer.email} - {self.get_day_of_week_display()} {self.start_time}-{self.end_time}"
@@ -94,7 +99,12 @@ class DateOverrideRule(models.Model):
         db_table = 'date_override_rules'
         verbose_name = 'Date Override Rule'
         verbose_name_plural = 'Date Override Rules'
-        unique_together = ['organizer', 'date']
+        # Allow multiple overrides per date for different event types
+        # Validation is handled in serializers
+        indexes = [
+            models.Index(fields=['organizer', 'date', 'is_active']),
+            models.Index(fields=['organizer', 'is_active']),
+        ]
     
     def __str__(self):
         status = "Available" if self.is_available else "Blocked"

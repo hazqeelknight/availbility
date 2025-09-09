@@ -1,1223 +1,637 @@
-from datetime import datetime, timedelta, time
-from django.utils import timezone
-from django.db import models
-from zoneinfo import ZoneInfo
-from .models import AvailabilityRule, BlockedTime, BufferTime, DateOverrideRule, RecurringBlockedTime
-from apps.events.models import Booking, EventTypeAvailabilityCache
 import logging
-import time as time_module
+from datetime import datetime, timedelta, time, date
+from typing import List, Dict, Any, Optional, Tuple, Union
+from zoneinfo import ZoneInfo
+from django.utils import timezone
 from django.core.cache import cache
-from typing import Tuple, List, Dict, Any, Optional
+from django.conf import settings
+from django.db.models import Q, Count
+from apps.users.models import User
+import hashlib
 
 logger = logging.getLogger(__name__)
 
 
-def are_time_intervals_overlapping(start1_str: str, end1_str: str, start2_str: str, end2_str: str, 
-                                 allow_adjacency: bool = False) -> bool:
+def validate_timezone(tz_string: str) -> bool:
     """
-    Canonical function for checking if two time intervals overlap.
-    
-    This is the single source of truth for all overlap detection logic.
+    Validate if a timezone string is valid.
     
     Args:
-        start1_str: Start time of first interval (HH:MM:SS format)
-        end1_str: End time of first interval (HH:MM:SS format)
-        start2_str: Start time of second interval (HH:MM:SS format)
-        end2_str: End time of second interval (HH:MM:SS format)
-        allow_adjacency: If True, adjacent intervals are considered overlapping
-    
+        tz_string: IANA timezone identifier (e.g., 'America/New_York')
+        
     Returns:
-        bool: True if intervals overlap (or are adjacent if allow_adjacency=True)
+        bool: True if valid, False otherwise
     """
-    if not all([start1_str, end1_str, start2_str, end2_str]):
+    if not tz_string:
         return False
     
     try:
-        # Convert time strings to minutes from midnight
-        start1_minutes = _time_str_to_minutes(start1_str)
-        end1_minutes = _time_str_to_minutes(end1_str)
-        start2_minutes = _time_str_to_minutes(start2_str)
-        end2_minutes = _time_str_to_minutes(end2_str)
-        
-        # Handle midnight-spanning intervals
-        if end1_minutes < start1_minutes:  # First interval spans midnight
-            end1_minutes += 24 * 60
-        if end2_minutes < start2_minutes:  # Second interval spans midnight
-            end2_minutes += 24 * 60
-        
-        # Check for overlap
-        if allow_adjacency:
-            # Adjacent intervals are considered overlapping
-            return start1_minutes <= end2_minutes and end1_minutes >= start2_minutes
-        else:
-            # Strict overlap only
-            return start1_minutes < end2_minutes and end1_minutes > start2_minutes
-            
-    except (ValueError, IndexError) as e:
-        logger.error(f"Error parsing time strings in overlap check: {e}")
-        return False
-
-
-def _time_str_to_minutes(time_str: str) -> int:
-    """
-    Convert time string (HH:MM:SS or HH:MM) to minutes from midnight.
-    
-    Args:
-        time_str: Time string in HH:MM:SS or HH:MM format
-    
-    Returns:
-        int: Minutes from midnight
-    """
-    parts = time_str.split(':')
-    hours = int(parts[0])
-    minutes = int(parts[1])
-    return hours * 60 + minutes
-
-
-def get_time_interval_details(start_str: str, end_str: str) -> Dict[str, Any]:
-    """
-    Get detailed information about a time interval.
-    
-    Args:
-        start_str: Start time string (HH:MM:SS)
-        end_str: End time string (HH:MM:SS)
-    
-    Returns:
-        Dict with interval details including spans_midnight, duration_minutes, etc.
-    """
-    start_minutes = _time_str_to_minutes(start_str)
-    end_minutes = _time_str_to_minutes(end_str)
-    
-    spans_midnight = end_minutes < start_minutes
-    
-    if spans_midnight:
-        duration_minutes = (24 * 60 - start_minutes) + end_minutes
-    else:
-        duration_minutes = end_minutes - start_minutes
-    
-    return {
-        'spans_midnight': spans_midnight,
-        'duration_minutes': duration_minutes,
-        'start_minutes': start_minutes,
-        'end_minutes': end_minutes,
-    }
-
-
-def get_external_busy_times(organizer, start_date, end_date):
-    """
-    Get busy times from external calendar integrations.
-    
-    Args:
-        organizer: User instance
-        start_date: Start date for busy time search
-        end_date: End date for busy time search
-    
-    Returns:
-        list: List of busy time periods
-    """
-    busy_times = []
-    
-    try:
-        from apps.integrations.models import CalendarIntegration
-        
-        # Get active calendar integrations
-        calendar_integrations = CalendarIntegration.objects.filter(
-            organizer=organizer,
-            is_active=True,
-            sync_enabled=True
-        )
-        
-        for integration in calendar_integrations:
-            # Get busy times from this integration with specific error handling
-            try:
-                integration_busy_times = integration.get_busy_times(start_date, end_date)
-                if integration_busy_times:
-                    busy_times.extend(integration_busy_times)
-            except (ConnectionError, TimeoutError) as e:
-                logger.warning(f"Network error fetching busy times from {integration.provider}: {e}")
-                # Continue with other integrations
-                continue
-            except ValueError as e:
-                logger.error(f"Invalid data from {integration.provider}: {e}")
-                # Continue with other integrations
-                continue
-            except AttributeError as e:
-                logger.error(f"Integration method error for {integration.provider}: {e}")
-                # Continue with other integrations
-                continue
-            except Exception as e:
-                logger.error(f"Unexpected error fetching busy times from {integration.provider}: {e}")
-                # Continue with other integrations - don't let one bad integration break everything
-                continue
-                    client = OutlookCalendarClient(integration)
-                    events = client.get_busy_times(start_date, end_date)
-                else:
-                    continue
-                
-                # Convert to our format
-                for event in events:
-                    busy_times.append({
-                        'start_time': event['start_datetime'],
-                        'end_time': event['end_datetime'],
-                        'source': f"{integration.provider}_calendar",
-                        'title': event.get('summary', 'Busy')
-                    })
-                    
-            except (ImportError, AttributeError) as e:
-                logger.error(f"Integration client not available for {integration.provider}: {str(e)}")
-                continue
-            except (ConnectionError, TimeoutError) as e:
-                logger.warning(f"Network error fetching busy times from {integration.provider}: {str(e)}")
-                continue
-            except (ValueError, KeyError) as e:
-                logger.warning(f"Invalid data from {integration.provider} calendar: {str(e)}")
-                continue
-            except Exception as e:
-                logger.warning(f"Error fetching busy times from {integration.provider}: {str(e)}")
-                continue
-        
-        return busy_times
-        
-    except ImportError:
-        # Integrations module not available
-        logger.debug("Calendar integrations module not available")
-        return []
-    except Exception as e:
-        logger.error(f"Unexpected error getting external busy times: {e}")
-        return []
-
-
-class PerformanceProfiler:
-    """Context manager for profiling performance of code blocks."""
-    
-    def __init__(self, operation_name, log_threshold=0.1):
-        self.operation_name = operation_name
-        self.log_threshold = log_threshold
-        self.start_time = None
-        self.metrics = {}
-    
-    def __enter__(self):
-        self.start_time = time_module.time()
-        return self
-    
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        duration = time_module.time() - self.start_time
-        if duration > self.log_threshold:
-            logger.info(f"Performance: {self.operation_name} took {duration:.3f}s")
-        self.metrics['duration'] = duration
-    
-    def checkpoint(self, name):
-        """Add a checkpoint for detailed profiling."""
-        if self.start_time:
-            self.metrics[name] = time_module.time() - self.start_time
-
-def calculate_available_slots(organizer, event_type, start_date, end_date, invitee_timezone='UTC', 
-                            attendee_count=1, invitee_timezones=None):
-    """
-    Enhanced calculate available time slots with comprehensive conflict resolution.
-    
-    Args:
-        organizer: User instance (organizer)
-        event_type: EventType instance
-        start_date: datetime.date object
-        end_date: datetime.date object
-        invitee_timezone: IANA timezone string (primary invitee)
-        attendee_count: Number of attendees for this booking (default: 1)
-        invitee_timezones: List of IANA timezone strings for multi-invitee scheduling
-    try:
-        # Get buffer times for this event type (with fallback to organizer defaults)
-        buffer_before = getattr(event_type, 'buffer_time_before', None)
-        buffer_after = getattr(event_type, 'buffer_time_after', None)
-        
-        # If event type doesn't have specific buffers, use organizer defaults
-        if buffer_before is None or buffer_after is None:
-            try:
-                buffer_settings = event_type.organizer.buffer_settings
-                buffer_before = buffer_before if buffer_before is not None else buffer_settings.default_buffer_before
-                buffer_after = buffer_after if buffer_after is not None else buffer_settings.default_buffer_after
-            except AttributeError:
-                # No buffer settings found, use zero
-                buffer_before = buffer_before or 0
-                buffer_after = buffer_after or 0
-        
-        # Apply buffer times to the slot
-        buffered_start = start_time - timedelta(minutes=buffer_before)
-        buffered_end = end_time + timedelta(minutes=buffer_after)
-        
-        # Get all bookings that overlap with the buffered time range
-        overlapping_bookings = existing_bookings.filter(
-            start_time__lt=buffered_end,
-            end_time__gt=buffered_start,
-            status__in=['confirmed', 'rescheduled']  # Include rescheduled as they still block time
-        )
-        
-        # If no overlapping bookings, slot is available
-        if not overlapping_bookings.exists():
-            return False
-        
-        # Group overlapping bookings by event type for capacity analysis
-        event_type_bookings = {}
-        for booking in overlapping_bookings:
-            et_id = booking.event_type.id
-            if et_id not in event_type_bookings:
-                event_type_bookings[et_id] = []
-            event_type_bookings[et_id].append(booking)
-        
-        # Check conflicts for each event type
-        for et_id, bookings in event_type_bookings.items():
-            booking_event_type = bookings[0].event_type
-            
-            # If it's a different event type, any overlap is a conflict
-            if et_id != event_type.id:
-                return True
-            
-            # Same event type - check if it's a group event
-            if hasattr(booking_event_type, 'max_attendees') and booking_event_type.max_attendees > 1:
-                # For group events, check capacity across ALL overlapping bookings
-                total_confirmed_attendees = 0
-                
-                for booking in bookings:
-                    # Check if this booking actually overlaps with our slot (not just the buffered range)
-                    if (booking.start_time < end_time and booking.end_time > start_time):
-                        total_confirmed_attendees += booking.attendee_count
-                
-                # Check if adding new attendees would exceed capacity
-                if (total_confirmed_attendees + attendee_count) > booking_event_type.max_attendees:
-                    return True
-                
-                # If there's still capacity, continue checking other event types
-                continue
-            else:
-                # For non-group events of the same type, any overlap is a conflict
-                return True
-        
-        # No conflicts found after checking all overlapping bookings
-        return False
-        
-    except Exception as e:
-        logger.error(f"Error checking booking conflicts: {e}")
-        # Fail safe: assume conflict to prevent double-booking
-        return True
-            is_active=True
-        ).filter(
-            models.Q(event_types__isnull=True) | models.Q(event_types=event_type)
-        ).distinct()
-        
-        profiler.checkpoint('rules_query')
-        
-        # Get date overrides that apply to this event type
-        date_overrides = DateOverrideRule.objects.filter(
-            organizer=organizer,
-            is_active=True,
-            date__gte=start_date,
-            date__lte=end_date
-        ).filter(
-            models.Q(event_types__isnull=True) | models.Q(event_types=event_type)
-        ).distinct()
-        
-        # Get blocked times
-        blocked_times = BlockedTime.objects.filter(
-            organizer=organizer,
-            is_active=True,
-            start_datetime__date__lte=end_date,
-            end_datetime__date__gte=start_date
-        )
-        
-        # Get recurring blocked times
-        recurring_blocks = RecurringBlockedTime.objects.filter(
-            organizer=organizer,
-            is_active=True
-        )
-        
-        # Get existing bookings (ALL event types for this organizer)
-        existing_bookings = Booking.objects.filter(
-            organizer=organizer,
-            status='confirmed',
-            start_time__date__lte=end_date,
-            end_time__date__gte=start_date
-        ).select_related('event_type')
-        
-        # Get external calendar busy times
-        external_busy_times = get_external_busy_times(organizer, start_date, end_date)
-        
-        # Get buffer settings
-        buffer_settings, _ = BufferTime.objects.get_or_create(organizer=organizer)
-        
-        profiler.checkpoint('data_queries')
-        
-        available_slots = []
-        current_date = start_date
-        
-        while current_date <= end_date:
-            # Skip past dates
-            if current_date < timezone.now().date():
-                current_date += timedelta(days=1)
-                continue
-            
-            # Check if event type can be booked on this date
-            if not event_type.can_book_on_date(current_date):
-                current_date += timedelta(days=1)
-                continue
-            
-            # Check for date-specific overrides first
-            date_override = date_overrides.filter(date=current_date).first()
-            
-            if date_override:
-                if not date_override.is_available:
-                    # Entire day is blocked
-                    current_date += timedelta(days=1)
-                    continue
-                else:
-                    # Use override times instead of regular rules
-                    slots = generate_slots_for_override(
-                        override=date_override,
-                        date=current_date,
-                        event_type=event_type,
-                        organizer_timezone=organizer_timezone,
-                        invitee_timezone=invitee_timezone,
-                        blocked_times=blocked_times,
-                        recurring_blocks=recurring_blocks,
-                        existing_bookings=existing_bookings,
-                        external_busy_times=external_busy_times,
-                        buffer_settings=buffer_settings,
-                        attendee_count=attendee_count
-                    )
-                    available_slots.extend(slots)
-            else:
-                # Use regular availability rules
-                day_of_week = current_date.weekday()  # 0=Monday, 6=Sunday
-                day_rules = availability_rules.filter(day_of_week=day_of_week)
-                
-                for rule in day_rules:
-                    if rule.applies_to_event_type(event_type):
-                        slots = generate_slots_for_rule(
-                            rule=rule,
-                            date=current_date,
-                            event_type=event_type,
-                            organizer_timezone=organizer_timezone,
-                            invitee_timezone=invitee_timezone,
-                            blocked_times=blocked_times,
-                            recurring_blocks=recurring_blocks,
-                            existing_bookings=existing_bookings,
-                            external_busy_times=external_busy_times,
-                            buffer_settings=buffer_settings,
-                            attendee_count=attendee_count
-                        )
-                        available_slots.extend(slots)
-            
-            current_date += timedelta(days=1)
-        
-        profiler.checkpoint('slot_generation')
-        
-        # Merge overlapping or adjacent slots
-        available_slots = merge_overlapping_slots(available_slots)
-        
-        # Sort slots by start time
-        available_slots.sort(key=lambda x: x['start_time'])
-        
-        # Apply DST safety checks (but don't filter out DST-crossing slots)
-        available_slots = enhance_slots_with_dst_info(
-            organizer_timezone, invitee_timezone, available_slots
-        )
-        
-        profiler.checkpoint('slot_processing')
-        
-        # Handle multi-invitee timezone intersection if needed
-        if invitee_timezones and len(invitee_timezones) > 1:
-            result = calculate_multi_invitee_intersection(
-                available_slots, invitee_timezones, invitee_timezone, organizer
-            )
-            if isinstance(result, dict):
-                available_slots = result.get('slots', [])
-                warnings.extend(result.get('warnings', []))
-            else:
-                available_slots = result
-        
-        profiler.checkpoint('multi_invitee_processing')
-        
-        result = {
-            'slots': available_slots,
-            'warnings': warnings,
-            'cache_hit': False,
-            'total_slots': len(available_slots),
-            'performance_metrics': profiler.metrics
-        }
-        
-        # Cache the result (for single-day requests)
-        if start_date == end_date and len(available_slots) > 0:
-            cache.set(cache_key, result, timeout=900)  # Cache for 15 minutes
-        
-        return result
-
-
-def is_cache_dirty_for_organizer(organizer_id):
-    """
-    Check if cache is dirty for the given organizer.
-    
-    Args:
-        organizer_id: UUID of the organizer
-    
-    Returns:
-        bool: True if cache is marked as dirty
-    """
-    try:
-        dirty_key = f"dirty_cache:{organizer_id}"
-        
-        # Get existing dirty data or create new
-        existing_dirty_data = cache.get(dirty_key, {
-            'requires_full_invalidation': False,
-            'changes': [],
-            'first_marked_at': timezone.now().isoformat(),
-        })
-        
-        # Update dirty data
-        if requires_full_invalidation:
-            existing_dirty_data['requires_full_invalidation'] = True
-        
-        # Add this change to the list
-        change_record = {
-            'cache_type': cache_type,
-            'timestamp': timezone.now().isoformat(),
-            **kwargs
-        }
-        existing_dirty_data['changes'].append(change_record)
-        
-        # Store updated dirty data with extended timeout
-        cache.set(dirty_key, existing_dirty_data, timeout=7200)  # 2 hours
-        
-        logger.debug(f"Marked cache dirty for organizer {organizer_id}: {cache_type}")
-        
-    except Exception as e:
-        logger.error(f"Error marking cache dirty for organizer {organizer_id}: {e}")
-
-
-def get_dirty_organizers():
-    """
-    Get list of organizer IDs that have dirty cache flags.
-    
-    Returns:
-        List of organizer UUIDs that need cache processing
-    """
-    try:
-        # This requires django-redis or a cache backend that supports pattern matching
-        if hasattr(cache, 'keys'):
-            dirty_keys = cache.keys('dirty_cache:*')
-            organizer_ids = []
-            for key in dirty_keys:
-                # Extract organizer ID from key like 'dirty_cache:uuid'
-                if isinstance(key, str) and key.startswith('dirty_cache:'):
-                    organizer_id = key.replace('dirty_cache:', '')
-                    organizer_ids.append(organizer_id)
-            return organizer_ids
-        else:
-            logger.warning("Cache backend doesn't support keys() - cannot get dirty organizers")
-            return []
-    except Exception as e:
-        logger.error(f"Error getting dirty organizers: {e}")
-        return []
-
-
-def clear_dirty_flags(organizer_id):
-    """
-    Clear dirty cache flags for an organizer after processing.
-    
-    Args:
-        organizer_id: UUID of the organizer
-    """
-    try:
-        dirty_key = f"dirty_cache:{organizer_id}"
-        cache.delete(dirty_key)
-        logger.debug(f"Cleared dirty flags for organizer {organizer_id}")
-    except Exception as e:
-        logger.error(f"Error clearing dirty flags for organizer {organizer_id}: {e}")
-    return dirty_data is not None
-
-
-def generate_slots_for_rule(rule, date, event_type, organizer_timezone, invitee_timezone, 
-                          blocked_times, recurring_blocks, existing_bookings, 
-                          external_busy_times, buffer_settings, attendee_count=1):
-    """
-    Generate available slots for a specific availability rule on a specific date.
-    """
-    slots = []
-    
-    # Create timezone objects
-    org_tz = ZoneInfo(organizer_timezone)
-    invitee_tz = ZoneInfo(invitee_timezone)
-    
-    # Handle midnight-crossing rules
-    if rule.spans_midnight():
-        # Rule spans midnight - split into two parts
-        # Part 1: start_time to midnight
-        slots.extend(_generate_slots_for_time_range(
-            date, rule.start_time, time(23, 59, 59),
-            event_type, org_tz, invitee_tz, blocked_times, recurring_blocks,
-            existing_bookings, external_busy_times, buffer_settings, attendee_count
-        ))
-        
-        # Part 2: midnight to end_time (next day)
-        next_date = date + timedelta(days=1)
-        slots.extend(_generate_slots_for_time_range(
-            next_date, time(0, 0), rule.end_time,
-            event_type, org_tz, invitee_tz, blocked_times, recurring_blocks,
-            existing_bookings, external_busy_times, buffer_settings, attendee_count
-        ))
-    else:
-        # Normal rule within same day
-        slots.extend(_generate_slots_for_time_range(
-            date, rule.start_time, rule.end_time,
-            event_type, org_tz, invitee_tz, blocked_times, recurring_blocks,
-            existing_bookings, external_busy_times, buffer_settings, attendee_count
-        ))
-    
-    return slots
-
-
-def generate_slots_for_override(override, date, event_type, organizer_timezone, invitee_timezone,
-                              blocked_times, recurring_blocks, existing_bookings, 
-                              external_busy_times, buffer_settings, attendee_count=1):
-    """
-    Generate available slots for a date override rule.
-    """
-    if not override.is_available or not override.start_time or not override.end_time:
-        return []
-    
-    # Create timezone objects
-    org_tz = ZoneInfo(organizer_timezone)
-    invitee_tz = ZoneInfo(invitee_timezone)
-    
-    # Handle midnight-crossing overrides
-    if override.spans_midnight():
-        # Override spans midnight - split into two parts
-        slots = []
-        
-        # Part 1: start_time to midnight
-        slots.extend(_generate_slots_for_time_range(
-            date, override.start_time, time(23, 59, 59),
-            event_type, org_tz, invitee_tz, blocked_times, recurring_blocks,
-            existing_bookings, external_busy_times, buffer_settings, attendee_count
-        ))
-        
-        # Part 2: midnight to end_time (next day)
-        next_date = date + timedelta(days=1)
-        slots.extend(_generate_slots_for_time_range(
-            next_date, time(0, 0), override.end_time,
-            event_type, org_tz, invitee_tz, blocked_times, recurring_blocks,
-            existing_bookings, external_busy_times, buffer_settings, attendee_count
-        ))
-        
-        return slots
-    else:
-        # Normal override within same day
-        return _generate_slots_for_time_range(
-            date, override.start_time, override.end_time,
-            event_type, org_tz, invitee_tz, blocked_times, recurring_blocks,
-            existing_bookings, external_busy_times, buffer_settings, attendee_count
-        )
-
-
-def _generate_slots_for_time_range(date, start_time, end_time, event_type, org_tz, invitee_tz,
-                                 blocked_times, recurring_blocks, existing_bookings, 
-                                 external_busy_times, buffer_settings, attendee_count):
-    """
-    Internal helper to generate slots for a specific time range on a specific date.
-    """
-    import time as time_module
-    start_computation = time_module.time()
-    
-    slots = []
-    
-    # Create start and end datetime for the time range on this date
-    range_start = datetime.combine(date, start_time).replace(tzinfo=org_tz)
-    range_end = datetime.combine(date, end_time).replace(tzinfo=org_tz)
-    
-    # Convert to UTC for calculations
-    range_start_utc = range_start.astimezone(timezone.utc)
-    range_end_utc = range_end.astimezone(timezone.utc)
-    
-    # Calculate slot duration including buffers
-    slot_duration = timedelta(minutes=event_type.duration)
-    buffer_before = timedelta(minutes=getattr(event_type, 'buffer_time_before', buffer_settings.default_buffer_before))
-    buffer_after = timedelta(minutes=getattr(event_type, 'buffer_time_after', buffer_settings.default_buffer_after))
-    minimum_gap = timedelta(minutes=buffer_settings.minimum_gap)
-    
-    # Get slot interval - prioritize event type, then buffer settings, then default
-    event_slot_interval = getattr(event_type, 'slot_interval_minutes', 0)
-    if event_slot_interval > 0:
-        slot_interval = timedelta(minutes=event_slot_interval)
-    else:
-        slot_interval = timedelta(minutes=getattr(buffer_settings, 'slot_interval_minutes', 15))
-    
-    # Generate slots
-    current_slot_start = range_start_utc
-    
-    while current_slot_start + slot_duration <= range_end_utc:
-        slot_end = current_slot_start + slot_duration
-        
-        # Check if this slot conflicts with blocked times
-        if is_slot_blocked(current_slot_start, slot_end, blocked_times):
-            current_slot_start += slot_interval
-            continue
-        
-        # Check if this slot conflicts with recurring blocked times
-        if is_slot_blocked_by_recurring(current_slot_start, slot_end, recurring_blocks, org_tz):
-            current_slot_start += slot_interval
-            continue
-        
-        # Check if this slot conflicts with external calendar events
-        if is_slot_blocked_by_external_calendar(current_slot_start, slot_end, external_busy_times):
-            current_slot_start += slot_interval
-            continue
-        
-        # Check if this slot conflicts with existing bookings (including buffers)
-        buffered_start = current_slot_start - buffer_before
-        buffered_end = slot_end + buffer_after
-        
-        if is_slot_conflicting_with_bookings(current_slot_start, slot_end, existing_bookings, event_type, attendee_count, buffer_before, buffer_after):
-            current_slot_start += slot_interval
-            continue
-        
-        # Check minimum booking notice
-        min_notice = timedelta(minutes=getattr(event_type, 'min_scheduling_notice', 
-                                            getattr(event_type, 'min_booking_notice', 60)))
-        if current_slot_start < timezone.now() + min_notice:
-            current_slot_start += slot_interval
-            continue
-        
-        # Check maximum booking advance
-        max_advance = timedelta(minutes=getattr(event_type, 'max_scheduling_horizon',
-                                              getattr(event_type, 'max_booking_advance', 43200)))
-        if current_slot_start > timezone.now() + max_advance:
-            break
-        
-        # Check daily booking limits
-        if _exceeds_daily_booking_limit(event_type, current_slot_start):
-            current_slot_start += slot_interval
-            continue
-        
-        # This slot is available
-        slot = {
-            'start_time': current_slot_start,
-            'end_time': slot_end,
-            'duration_minutes': event_type.duration,
-            'available_spots': _get_available_spots_for_slot(
-                event_type, current_slot_start, slot_end, existing_bookings, attendee_count
-            ),
-        }
-        
-        # Add localized times for display
-        if invitee_timezone != 'UTC':
-            slot['local_start_time'] = current_slot_start.astimezone(invitee_tz)
-            slot['local_end_time'] = slot_end.astimezone(invitee_tz)
-        
-        slots.append(slot)
-        
-        # Move to next slot (15-minute intervals + minimum gap)
-        next_increment = max(slot_interval, minimum_gap)
-        current_slot_start += next_increment
-    
-    # Log computation time for performance monitoring
-    computation_time = time_module.time() - start_computation
-    if computation_time > 0.1:  # Log if computation takes more than 100ms
-        logger.info(f"Slot generation took {computation_time:.3f}s for {date} ({len(slots)} slots)")
-    
-    return slots
-
-
-def is_slot_blocked_by_external_calendar(start_time, end_time, external_busy_times):
-    """Check if a time slot conflicts with external calendar events."""
-    for busy_period in external_busy_times:
-        busy_start = busy_period['start_time']
-        busy_end = busy_period['end_time']
-        
-        # Check for overlap
-        if start_time < busy_end and end_time > busy_start:
-            return True
-    
-    return False
-
-
-def is_slot_blocked(start_time, end_time, blocked_times):
-    """Check if a time slot conflicts with blocked times."""
-    for blocked in blocked_times:
-        blocked_start = blocked.start_datetime
-        blocked_end = blocked.end_datetime
-        
-        # Check for overlap using proper interval logic
-        if (start_time < blocked_end and end_time > blocked_start):
-            return True
-    
-    return False
-
-
-def is_slot_blocked_by_recurring(start_time, end_time, recurring_blocks, organizer_tz):
-    """Check if a time slot conflicts with recurring blocked times."""
-    for recurring_block in recurring_blocks:
-        # Check if this recurring block applies to the date
-        slot_date = start_time.astimezone(organizer_tz).date()
-        
-        if not recurring_block.applies_to_date(slot_date):
-            continue
-        
-        # Convert recurring block times to UTC for comparison
-        if recurring_block.spans_midnight():
-            # Handle midnight-spanning blocks
-            # Part 1: start_time to midnight
-            block_start_1 = datetime.combine(slot_date, recurring_block.start_time).replace(tzinfo=organizer_tz)
-            block_end_1 = datetime.combine(slot_date, time(23, 59, 59)).replace(tzinfo=organizer_tz)
-            
-            block_start_1_utc = block_start_1.astimezone(timezone.utc)
-            block_end_1_utc = block_end_1.astimezone(timezone.utc)
-            
-            if (start_time < block_end_1_utc and end_time > block_start_1_utc):
-                return True
-            
-            # Part 2: midnight to end_time (next day)
-            next_date = slot_date + timedelta(days=1)
-            block_start_2 = datetime.combine(next_date, time(0, 0)).replace(tzinfo=organizer_tz)
-            block_end_2 = datetime.combine(next_date, recurring_block.end_time).replace(tzinfo=organizer_tz)
-            
-            block_start_2_utc = block_start_2.astimezone(timezone.utc)
-            block_end_2_utc = block_end_2.astimezone(timezone.utc)
-            
-            if (start_time < block_end_2_utc and end_time > block_start_2_utc):
-                return True
-        else:
-            # Normal recurring block within same day
-            block_start = datetime.combine(slot_date, recurring_block.start_time).replace(tzinfo=organizer_tz)
-            block_end = datetime.combine(slot_date, recurring_block.end_time).replace(tzinfo=organizer_tz)
-            
-            block_start_utc = block_start.astimezone(timezone.utc)
-            block_end_utc = block_end.astimezone(timezone.utc)
-            
-            if (start_time < block_end_utc and end_time > block_start_utc):
-                return True
-    
-    return False
-
-
-def is_slot_conflicting_with_bookings(start_time, end_time, existing_bookings, event_type, attendee_count=1, 
-                                     buffer_before=None, buffer_after=None):
-    """
-    Check if a time slot conflicts with existing bookings with robust capacity handling.
-    
-    Args:
-        start_time: Proposed slot start time (UTC datetime)
-        end_time: Proposed slot end time (UTC datetime)
-        existing_bookings: QuerySet of existing bookings
-        event_type: EventType instance for the proposed booking
-        attendee_count: Number of attendees for the proposed booking
-        buffer_before: Buffer time before the slot (timedelta)
-        buffer_after: Buffer time after the slot (timedelta)
-    
-    Returns:
-        bool: True if there's a conflict, False if slot is available
-    """
-    # Apply buffer times to the proposed slot
-    if buffer_before:
-        buffered_start = start_time - buffer_before
-    else:
-        buffered_start = start_time
-        
-    if buffer_after:
-        buffered_end = end_time + buffer_after
-    else:
-        buffered_end = end_time
-    
-    # Get overlapping bookings
-    overlapping_bookings = []
-    for booking in existing_bookings:
-        # Apply booking's own buffer times
-        booking_buffer_before = timedelta(minutes=getattr(booking.event_type, 'buffer_time_before', 0))
-        booking_buffer_after = timedelta(minutes=getattr(booking.event_type, 'buffer_time_after', 0))
-        
-        buffered_booking_start = booking.start_time - booking_buffer_before
-        buffered_booking_end = booking.end_time + booking_buffer_after
-        
-        # Check for overlap using proper interval logic
-        if (buffered_start < buffered_booking_end and buffered_end > buffered_booking_start):
-            overlapping_bookings.append(booking)
-    
-    # If no overlapping bookings, slot is available
-    if not overlapping_bookings:
-        return False
-    
-    # For group events of the same type, aggregate capacity across all overlapping bookings
-    if event_type.is_group_event():
-        same_event_type_bookings = [
-            booking for booking in overlapping_bookings 
-            if booking.event_type.id == event_type.id
-        ]
-        
-        if same_event_type_bookings:
-            # Check if any of these bookings have the exact same time slot
-            exact_time_bookings = [
-                booking for booking in same_event_type_bookings
-                if booking.start_time == start_time and booking.end_time == end_time
-            ]
-            
-            if exact_time_bookings:
-                # For exact time matches, check capacity
-                total_confirmed_attendees = sum(
-                    booking.attendees.filter(status='confirmed').count()
-                    for booking in exact_time_bookings
-                )
-                
-                if total_confirmed_attendees + attendee_count <= event_type.max_attendees:
-                    # Still has capacity for this exact slot
-                    # But check if there are conflicts with different event types
-                    different_event_type_bookings = [
-                        booking for booking in overlapping_bookings 
-                        if booking.event_type.id != event_type.id
-                    ]
-                    return len(different_event_type_bookings) > 0
-                else:
-                    # Exceeds capacity
-                    return True
-            else:
-                # No exact time matches for same event type, but there are overlapping bookings
-                # This is a conflict for group events (can't have overlapping but different times)
-                return True
-    
-    # For non-group events or different event types, any overlap is a conflict
-    for booking in overlapping_bookings:
-
-
-def _exceeds_daily_booking_limit(event_type, start_time):
-    """Check if booking would exceed daily limits."""
-    if not event_type.max_bookings_per_day:
-        return False
-    
-    # Count existing bookings for this event type on this date
-    org_tz = ZoneInfo(event_type.organizer.profile.timezone_name)
-    booking_date = start_time.astimezone(org_tz).date()
-    
-    existing_count = Booking.objects.filter(
-        organizer=event_type.organizer,
-        event_type=event_type,
-        status='confirmed',
-        start_time__date=booking_date
-    ).count()
-    
-    return existing_count >= event_type.max_bookings_per_day
-
-
-def _get_available_spots_for_slot(event_type, start_time, end_time, existing_bookings, requested_attendee_count):
-    """Get number of available spots for a specific slot."""
-    if not event_type.is_group_event():
-        return 1 if requested_attendee_count == 1 else 0
-    
-    # Find existing booking at this exact time
-    existing_booking = None
-    for booking in existing_bookings:
-        if (booking.event_type.id == event_type.id and
-            booking.start_time == start_time and
-            booking.end_time == end_time and
-            booking.status == 'confirmed'):
-            existing_booking = booking
-            break
-    
-    if existing_booking:
-        current_attendees = existing_booking.attendees.filter(status='confirmed').count()
-        return max(0, event_type.max_attendees - current_attendees)
-    
-    return event_type.max_attendees
-
-
-def merge_overlapping_slots(slots):
-    """
-    Merge overlapping or strictly adjacent time slots.
-    
-    Uses strict adjacency (no arbitrary fudge factors) for precise scheduling.
-    """
-    if not slots:
-        return slots
-    
-    # Sort slots by start time
-    sorted_slots = sorted(slots, key=lambda x: x['start_time'])
-    merged_slots = []
-    
-    current_slot = sorted_slots[0].copy()
-    
-    for next_slot in sorted_slots[1:]:
-        # Check if slots are strictly adjacent or overlapping
-        if current_slot['end_time'] >= next_slot['start_time']:
-            # Merge slots
-            current_slot['end_time'] = max(current_slot['end_time'], next_slot['end_time'])
-            # Update duration
-            duration_minutes = int((current_slot['end_time'] - current_slot['start_time']).total_seconds() / 60)
-            current_slot['duration_minutes'] = duration_minutes
-            
-            # Update localized times if they exist
-            if 'local_start_time' in current_slot and 'local_end_time' in next_slot:
-                current_slot['local_end_time'] = max(
-                    current_slot.get('local_end_time', current_slot['end_time']),
-                    next_slot.get('local_end_time', next_slot['end_time'])
-                )
-            
-            # Merge available spots (take minimum for safety)
-            if 'available_spots' in current_slot and 'available_spots' in next_slot:
-                current_slot['available_spots'] = min(
-                    current_slot['available_spots'],
-                    next_slot['available_spots']
-                )
-        else:
-            # No overlap, add current slot and move to next
-            merged_slots.append(current_slot)
-            current_slot = next_slot.copy()
-    
-    # Add the last slot
-    merged_slots.append(current_slot)
-    
-    return merged_slots
-
-
-def enhance_slots_with_dst_info(organizer_timezone, invitee_timezone, base_slots):
-    """
-    Enhance time slots with DST information without filtering them out.
-    
-    Previously this function filtered out DST-crossing slots, which created
-    artificial gaps in availability. Now it preserves all valid slots and
-    adds DST information for frontend display and debugging.
-    
-    Args:
-        organizer_timezone: Organizer's IANA timezone
-        invitee_timezone: Invitee's IANA timezone
-        base_slots: List of slot dictionaries
-    
-    Returns:
-        list: Slots enhanced with DST information
-    """
-    try:
-        org_tz = ZoneInfo(organizer_timezone)
-        invitee_tz = ZoneInfo(invitee_timezone)
-        
-        enhanced_slots = []
-        
-        for slot in base_slots:
-            start_time = slot['start_time']
-            end_time = slot['end_time']
-            
-            # Check if this slot crosses a DST boundary
-            start_local_org = start_time.astimezone(org_tz)
-            end_local_org = end_time.astimezone(org_tz)
-            
-            # Check for DST transition
-            start_dst = start_local_org.dst()
-            end_dst = end_local_org.dst()
-            
-            # Convert to invitee timezone
-            slot_copy = slot.copy()
-            slot_copy['local_start_time'] = start_time.astimezone(invitee_tz)
-            slot_copy['local_end_time'] = end_time.astimezone(invitee_tz)
-            
-            # Add comprehensive DST information for debugging and display
-            slot_copy['dst_info'] = {
-                'organizer_dst': bool(start_dst),
-                'invitee_dst': bool(start_time.astimezone(invitee_tz).dst()),
-                'dst_transition_during_slot': start_dst != end_dst,
-                'organizer_timezone': organizer_timezone,
-                'invitee_timezone': invitee_timezone,
-            }
-            
-            # Log warning for DST transitions but don't filter out the slot
-            if start_dst != end_dst:
-                logger.info(f"DST transition during slot {start_time} - {end_time} (preserved)")
-            
-            enhanced_slots.append(slot_copy)
-        
-        return enhanced_slots
-        
-    except Exception as e:
-
-
-def calculate_multi_invitee_intersection(organizer_slots, invitee_timezones, primary_timezone, organizer=None):
-    """
-    Calculate the intersection of available slots across multiple invitee timezones.
-    
-    Args:
-        organizer_slots: List of available slots from organizer's perspective
-        invitee_timezones: List of IANA timezone strings for all invitees
-        primary_timezone: Primary timezone for displaying results
-        organizer: User instance for getting custom reasonable hours
-    
-    Returns:
-        Dict with 'slots', 'warnings', and filtering details
-    """
-    if not invitee_timezones or len(invitee_timezones) <= 1:
-        return {
-            'slots': organizer_slots,
-            'warnings': [],
-            'filtered_count': 0,
-            'total_input_slots': len(organizer_slots)
-        }
-    
-    # Get reasonable hours from organizer's profile if available
-    if organizer and hasattr(organizer, 'profile'):
-        reasonable_start_hour = organizer.profile.reasonable_hours_start
-        reasonable_end_hour = organizer.profile.reasonable_hours_end
-    else:
-        reasonable_start_hour = 7
-        reasonable_end_hour = 22
-    
-    # For each slot, check if it falls within reasonable hours for all invitees
-    reasonable_slots = []
-    warnings = []
-    filtered_count = 0
-    
-    for slot in organizer_slots:
-        slot_start_utc = slot['start_time']
-        slot_end_utc = slot['end_time']
-        
-        # Check if this slot is reasonable for all invitees
-        is_reasonable_for_all = True
-        invitee_times = {}
-        unreasonable_timezones = []
-        
-        for tz_name in invitee_timezones:
-            try:
-                invitee_tz = ZoneInfo(tz_name)
-                local_start = slot_start_utc.astimezone(invitee_tz)
-                local_end = slot_end_utc.astimezone(invitee_tz)
-                
-                # Get reasonable hours for this timezone
-                tz_reasonable_start, tz_reasonable_end = get_reasonable_hours_for_timezone(
-                    tz_name, reasonable_start_hour, reasonable_end_hour
-                )
-                
-                # Check if slot falls within reasonable hours (but allow midnight spanning)
-                if (local_start.hour < tz_reasonable_start or 
-                    local_end.hour > tz_reasonable_end):
-                    is_reasonable_for_all = False
-                    unreasonable_timezones.append(f"{tz_name} ({local_start.hour:02d}:00-{local_end.hour:02d}:00)")
-                    break
-                
-                # Store timezone information
-                invitee_times[tz_name] = {
-                    'start_time': local_start,
-                    'end_time': local_end,
-                    'start_hour': local_start.hour,
-                    'end_hour': local_end.hour
-                }
-                    
-            except Exception as e:
-                logger.warning(f"Invalid timezone {tz_name}: {e}")
-                is_reasonable_for_all = False
-                warnings.append(f"Invalid timezone '{tz_name}' was skipped")
-                break
-        
-        if is_reasonable_for_all:
-            # Add timezone information for all invitees
-            slot_with_timezones = slot.copy()
-            slot_with_timezones['invitee_times'] = invitee_times
-            
-            # Calculate fairness score
-            slot_with_timezones['fairness_score'] = calculate_slot_fairness_score(invitee_times)
-            
-            reasonable_slots.append(slot_with_timezones)
-        else:
-            filtered_count += 1
-            if unreasonable_timezones:
-                logger.debug(f"Slot {slot_start_utc} filtered due to unreasonable hours in: {', '.join(unreasonable_timezones)}")
-    
-    # Sort by fairness score (higher is better)
-    reasonable_slots.sort(key=lambda x: x.get('fairness_score', 0), reverse=True)
-    
-    return {
-        'slots': reasonable_slots,
-        'warnings': warnings,
-        'filtered_count': filtered_count,
-        'total_input_slots': len(organizer_slots),
-        'reasonable_hours': {
-            'start_hour': reasonable_start_hour,
-            'end_hour': reasonable_end_hour
-        }
-    }
-
-def calculate_slot_fairness_score(invitee_times):
-    """
-    Calculate a fairness score for a slot across multiple timezones.
-    Higher score means more fair/optimal for all participants.
-    """
-    if not invitee_times:
-        return 0
-    
-    total_score = 0
-    
-    for tz_name, time_info in invitee_times.items():
-        local_hour = time_info['start_hour']
-        
-        # Score based on how reasonable the hour is (peak = 10 AM - 4 PM)
-        if 10 <= local_hour <= 16:
-            tz_score = 100  # Perfect time
-        elif 8 <= local_hour <= 18:
-            tz_score = 80   # Good time
-        elif 7 <= local_hour <= 20:
-            tz_score = 60   # Acceptable time
-        elif 6 <= local_hour <= 22:
-            tz_score = 40   # Early/late but manageable
-        else:
-            tz_score = 0    # Too early/late
-        
-        total_score += tz_score
-    
-    # Return average score
-    return total_score / len(invitee_times)
-
-
-def validate_timezone(timezone_string):
-    """Validate that a timezone string is a valid IANA timezone."""
-    try:
-        ZoneInfo(timezone_string)
+        ZoneInfo(tz_string)
         return True
     except Exception:
         return False
 
 
-def get_reasonable_hours_for_timezone(timezone_string, reasonable_start=7, reasonable_end=22):
+def are_time_intervals_overlapping(
+    start1: str, 
+    end1: str, 
+    start2: str, 
+    end2: str, 
+    allow_adjacency: bool = False
+) -> bool:
     """
-    Get reasonable working hours for a timezone.
+    Canonical function for checking if two time intervals overlap.
     
     Args:
-        timezone_string: IANA timezone string
-        reasonable_start: Start hour (24-hour format)
-        reasonable_end: End hour (24-hour format)
-    
+        start1, end1: First time interval (HH:MM:SS format)
+        start2, end2: Second time interval (HH:MM:SS format)
+        allow_adjacency: If True, adjacent intervals are considered overlapping
+        
     Returns:
-        Tuple of (start_hour, end_hour) in 24-hour format
+        bool: True if intervals overlap
     """
-    # Use provided reasonable hours (can be customized per organizer)
-    # Future enhancement: Consider cultural differences per timezone
-    return (reasonable_start, reasonable_end)
+    if not all([start1, end1, start2, end2]):
+        return False
+    
+    try:
+        # Convert time strings to minutes from midnight
+        start1_minutes = _time_to_minutes(start1)
+        end1_minutes = _time_to_minutes(end1)
+        start2_minutes = _time_to_minutes(start2)
+        end2_minutes = _time_to_minutes(end2)
+        
+        # Handle midnight-spanning intervals
+        if end1_minutes < start1_minutes:
+            end1_minutes += 24 * 60
+        if end2_minutes < start2_minutes:
+            end2_minutes += 24 * 60
+        
+        # Check for overlap
+        if allow_adjacency:
+            return start1_minutes <= end2_minutes and end1_minutes >= start2_minutes
+        else:
+            return start1_minutes < end2_minutes and end1_minutes > start2_minutes
+            
+    except Exception as e:
+        logger.error(f"Error in time overlap check: {e}")
+        return False
 
 
-def calculate_timezone_offset_hours(from_timezone, to_timezone, reference_date=None):
+def _time_to_minutes(time_str: str) -> int:
+    """Convert time string (HH:MM:SS) to minutes from midnight."""
+    try:
+        parts = time_str.split(':')
+        hours = int(parts[0])
+        minutes = int(parts[1])
+        return hours * 60 + minutes
+    except (ValueError, IndexError):
+        return 0
+
+
+def calculate_available_slots(
+    organizer: User,
+    event_type: 'EventType',
+    start_date: date,
+    end_date: date,
+    invitee_timezone: str = 'UTC',
+    attendee_count: int = 1,
+    invitee_timezones: Optional[List[str]] = None
+) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
     """
-    Calculate the hour offset between two timezones on a specific date.
+    Calculate available time slots for an organizer within a date range.
     
     Args:
-        from_timezone: Source IANA timezone string
-        to_timezone: Target IANA timezone string
-        reference_date: Date to calculate offset for (accounts for DST)
-    
+        organizer: User instance (organizer)
+        event_type: EventType instance
+        start_date: Start date for availability search
+        end_date: End date for availability search
+        invitee_timezone: IANA timezone string for the invitee
+        attendee_count: Number of attendees for group events
+        invitee_timezones: List of timezones for multi-invitee scheduling
+        
     Returns:
-        Float representing hour offset (positive if to_timezone is ahead)
+        List of available slots or dict with slots, warnings, and metrics
     """
+    import time as time_module
+    calculation_start = time_module.time()
+    
+    warnings = []
+    
+    # Validate timezone
+    if not validate_timezone(invitee_timezone):
+        warnings.append(f"Invalid invitee timezone: {invitee_timezone}")
+        invitee_timezone = 'UTC'
+    
+    # Validate multi-invitee timezones
+    if invitee_timezones:
+        valid_timezones = []
+        for tz in invitee_timezones:
+            if validate_timezone(tz):
+                valid_timezones.append(tz)
+            else:
+                warnings.append(f"Invalid timezone in list: {tz}")
+        invitee_timezones = valid_timezones
+    
+    try:
+        # Get organizer timezone
+        organizer_timezone = getattr(organizer.profile, 'timezone_name', 'UTC')
+        if not validate_timezone(organizer_timezone):
+            organizer_timezone = 'UTC'
+            warnings.append(f"Invalid organizer timezone, using UTC")
+        
+        # Get buffer settings
+        from .models import BufferTime
+        buffer_settings, _ = BufferTime.objects.get_or_create(organizer=organizer)
+        
+        # Get effective buffer times (event-specific overrides global defaults)
+        buffer_before = getattr(event_type, 'buffer_time_before', None) or buffer_settings.default_buffer_before
+        buffer_after = getattr(event_type, 'buffer_time_after', None) or buffer_settings.default_buffer_after
+        minimum_gap = buffer_settings.minimum_gap
+        slot_interval = getattr(event_type, 'slot_interval_minutes', None) or buffer_settings.slot_interval_minutes
+        
+        # Calculate available slots for each day
+        all_slots = []
+        current_date = start_date
+        
+        while current_date <= end_date:
+            daily_slots = _calculate_daily_slots(
+                organizer=organizer,
+                event_type=event_type,
+                target_date=current_date,
+                organizer_timezone=organizer_timezone,
+                invitee_timezone=invitee_timezone,
+                attendee_count=attendee_count,
+                buffer_before=buffer_before,
+                buffer_after=buffer_after,
+                minimum_gap=minimum_gap,
+                slot_interval=slot_interval
+            )
+            all_slots.extend(daily_slots)
+            current_date += timedelta(days=1)
+        
+        # Apply multi-invitee logic if needed
+        if invitee_timezones and len(invitee_timezones) > 1:
+            all_slots = calculate_multi_invitee_intersection(
+                all_slots, invitee_timezones, organizer
+            )
+        
+        # Enhance slots with timezone and DST information
+        enhanced_slots = enhance_slots_with_dst_info(all_slots, invitee_timezone)
+        
+        # Calculate performance metrics
+        calculation_time = time_module.time() - calculation_start
+        performance_metrics = {
+            'duration': calculation_time,
+            'total_slots_calculated': len(enhanced_slots),
+            'date_range_days': (end_date - start_date).days + 1,
+        }
+        
+        # Return comprehensive result
+        return {
+            'slots': enhanced_slots,
+            'warnings': warnings,
+            'performance_metrics': performance_metrics
+        }
+        
+    except Exception as e:
+        logger.error(f"Error calculating availability for {organizer.email}: {e}")
+        return {
+            'slots': [],
+            'warnings': warnings + [f"Calculation error: {str(e)}"],
+            'performance_metrics': {'duration': time_module.time() - calculation_start}
+        }
+
+
+def _calculate_daily_slots(
+    organizer: User,
+    event_type: 'EventType',
+    target_date: date,
+    organizer_timezone: str,
+    invitee_timezone: str,
+    attendee_count: int,
+    buffer_before: int,
+    buffer_after: int,
+    minimum_gap: int,
+    slot_interval: int
+) -> List[Dict[str, Any]]:
+    """Calculate available slots for a specific day."""
+    
+    # Get daily available intervals from rules and overrides
+    available_intervals = _get_daily_available_intervals(
+        organizer, event_type, target_date, organizer_timezone
+    )
+    
+    if not available_intervals:
+        return []
+    
+    # Generate potential slots from intervals
+    potential_slots = []
+    for interval_start, interval_end in available_intervals:
+        interval_slots = _generate_slots_from_interval(
+            interval_start, interval_end, event_type.duration, slot_interval
+        )
+        potential_slots.extend(interval_slots)
+    
+    # Filter out blocked and conflicting slots
+    available_slots = []
+    for slot in potential_slots:
+        if not is_slot_blocked(organizer, slot, target_date):
+            if not is_slot_conflicting_with_bookings(
+                organizer, event_type, slot, attendee_count, buffer_before, buffer_after, minimum_gap
+            ):
+                available_slots.append(slot)
+    
+    return available_slots
+
+
+def _get_daily_available_intervals(
+    organizer: User,
+    event_type: 'EventType',
+    target_date: date,
+    organizer_timezone: str
+) -> List[Tuple[datetime, datetime]]:
+    """Get available time intervals for a specific day."""
+    from .models import AvailabilityRule, DateOverrideRule
+    
+    # Check for date overrides first (they take precedence)
+    date_overrides = DateOverrideRule.objects.filter(
+        organizer=organizer,
+        date=target_date,
+        is_active=True
+    )
+    
+    # Filter overrides that apply to this event type
+    applicable_overrides = [
+        override for override in date_overrides
+        if override.applies_to_event_type(event_type)
+    ]
+    
+    if applicable_overrides:
+        intervals = []
+        for override in applicable_overrides:
+            if override.is_available and override.start_time and override.end_time:
+                # Convert to datetime in organizer timezone
+                start_dt = datetime.combine(target_date, override.start_time)
+                end_dt = datetime.combine(target_date, override.end_time)
+                
+                # Handle midnight spanning
+                if override.spans_midnight():
+                    end_dt += timedelta(days=1)
+                
+                # Convert to timezone-aware datetimes
+                tz = ZoneInfo(organizer_timezone)
+                start_dt = start_dt.replace(tzinfo=tz)
+                end_dt = end_dt.replace(tzinfo=tz)
+                
+                intervals.append((start_dt, end_dt))
+        return intervals
+    
+    # No overrides, use regular availability rules
+    day_of_week = target_date.weekday()
+    availability_rules = AvailabilityRule.objects.filter(
+        organizer=organizer,
+        day_of_week=day_of_week,
+        is_active=True
+    )
+    
+    # Filter rules that apply to this event type
+    applicable_rules = [
+        rule for rule in availability_rules
+        if rule.applies_to_event_type(event_type)
+    ]
+    
+    intervals = []
+    for rule in applicable_rules:
+        # Convert to datetime in organizer timezone
+        start_dt = datetime.combine(target_date, rule.start_time)
+        end_dt = datetime.combine(target_date, rule.end_time)
+        
+        # Handle midnight spanning
+        if rule.spans_midnight():
+            end_dt += timedelta(days=1)
+        
+        # Convert to timezone-aware datetimes
+        tz = ZoneInfo(organizer_timezone)
+        start_dt = start_dt.replace(tzinfo=tz)
+        end_dt = end_dt.replace(tzinfo=tz)
+        
+        intervals.append((start_dt, end_dt))
+    
+    # Merge overlapping intervals
+    return merge_overlapping_intervals(intervals)
+
+
+def _generate_slots_from_interval(
+    interval_start: datetime,
+    interval_end: datetime,
+    duration_minutes: int,
+    slot_interval_minutes: int
+) -> List[Dict[str, Any]]:
+    """Generate time slots within an available interval."""
+    slots = []
+    current_time = interval_start
+    
+    while current_time + timedelta(minutes=duration_minutes) <= interval_end:
+        slot_end = current_time + timedelta(minutes=duration_minutes)
+        
+        slots.append({
+            'start_time': current_time,
+            'end_time': slot_end,
+            'duration_minutes': duration_minutes
+        })
+        
+        current_time += timedelta(minutes=slot_interval_minutes)
+    
+    return slots
+
+
+def is_slot_blocked(organizer: User, slot: Dict[str, Any], target_date: date) -> bool:
+    """Check if a slot is blocked by one-time or recurring blocks."""
+    return (
+        is_slot_blocked_by_one_time(organizer, slot) or
+        is_slot_blocked_by_recurring(organizer, slot, target_date)
+    )
+
+
+def is_slot_blocked_by_one_time(organizer: User, slot: Dict[str, Any]) -> bool:
+    """Check if a slot is blocked by one-time blocked times."""
+    from .models import BlockedTime
+    
+    slot_start = slot['start_time']
+    slot_end = slot['end_time']
+    
+    blocked_times = BlockedTime.objects.filter(
+        organizer=organizer,
+        is_active=True,
+        start_datetime__lt=slot_end,
+        end_datetime__gt=slot_start
+    )
+    
+    return blocked_times.exists()
+
+
+def is_slot_blocked_by_recurring(organizer: User, slot: Dict[str, Any], target_date: date) -> bool:
+    """Check if a slot is blocked by recurring blocked times."""
+    from .models import RecurringBlockedTime
+    
+    slot_start = slot['start_time']
+    slot_end = slot['end_time']
+    
+    # Get recurring blocks for the day of week
+    day_of_week = target_date.weekday()
+    recurring_blocks = RecurringBlockedTime.objects.filter(
+        organizer=organizer,
+        day_of_week=day_of_week,
+        is_active=True
+    )
+    
+    for block in recurring_blocks:
+        # Check if block applies to this date
+        if not block.applies_to_date(target_date):
+            continue
+        
+        # Convert block times to datetime for comparison
+        block_start = datetime.combine(target_date, block.start_time)
+        block_end = datetime.combine(target_date, block.end_time)
+        
+        # Handle midnight spanning
+        if block.spans_midnight():
+            block_end += timedelta(days=1)
+        
+        # Add timezone info to match slot times
+        if slot_start.tzinfo:
+            block_start = block_start.replace(tzinfo=slot_start.tzinfo)
+            block_end = block_end.replace(tzinfo=slot_start.tzinfo)
+        
+        # Check for overlap
+        if block_start < slot_end and block_end > slot_start:
+            return True
+    
+    return False
+
+
+def is_slot_conflicting_with_bookings(
+    organizer: User,
+    event_type: 'EventType',
+    slot: Dict[str, Any],
+    attendee_count: int,
+    buffer_before: int,
+    buffer_after: int,
+    minimum_gap: int
+) -> bool:
+    """Check if a slot conflicts with existing bookings."""
+    from apps.events.models import Booking
+    
+    slot_start = slot['start_time']
+    slot_end = slot['end_time']
+    
+    # Calculate protected zone around the proposed slot
+    protected_start = slot_start - timedelta(minutes=buffer_before)
+    protected_end = slot_end + timedelta(minutes=buffer_after)
+    
+    # Get existing bookings that might conflict
+    existing_bookings = Booking.objects.filter(
+        organizer=organizer,
+        status='confirmed',
+        start_time__lt=protected_end,
+        end_time__gt=protected_start
+    )
+    
+    for booking in existing_bookings:
+        # Calculate protected zone around existing booking
+        booking_protected_start = booking.start_time - timedelta(minutes=minimum_gap)
+        booking_protected_end = booking.end_time + timedelta(minutes=minimum_gap)
+        
+        # Check for overlap with protected zones
+        if (booking_protected_start < protected_end and 
+            booking_protected_end > protected_start):
+            
+            # For group events, check capacity
+            if getattr(event_type, 'is_group_event', False) and booking.event_type_id == event_type.id:
+                # Sum attendees from all overlapping bookings of the same event type
+                overlapping_bookings = Booking.objects.filter(
+                    organizer=organizer,
+                    event_type=event_type,
+                    status='confirmed',
+                    start_time__lt=slot_end,
+                    end_time__gt=slot_start
+                )
+                
+                total_confirmed_attendees = sum(
+                    booking.attendee_count for booking in overlapping_bookings
+                )
+                
+                if total_confirmed_attendees + attendee_count > event_type.max_attendees:
+                    return True
+            else:
+                # Individual event - any overlap is a conflict
+                return True
+    
+    return False
+
+
+def calculate_multi_invitee_intersection(
+    slots: List[Dict[str, Any]],
+    invitee_timezones: List[str],
+    organizer: User
+) -> List[Dict[str, Any]]:
+    """Calculate timezone intersection and fairness scores for multi-invitee scheduling."""
+    
+    # Get reasonable hours from organizer profile
+    reasonable_start = getattr(organizer.profile, 'reasonable_hours_start', 9)
+    reasonable_end = getattr(organizer.profile, 'reasonable_hours_end', 18)
+    
+    enhanced_slots = []
+    
+    for slot in slots:
+        slot_start_utc = slot['start_time']
+        slot_end_utc = slot['end_time']
+        
+        invitee_times = {}
+        reasonable_count = 0
+        
+        for tz in invitee_timezones:
+            try:
+                # Convert to invitee timezone
+                local_start = slot_start_utc.astimezone(ZoneInfo(tz))
+                local_end = slot_end_utc.astimezone(ZoneInfo(tz))
+                
+                invitee_times[tz] = {
+                    'start_time': local_start.isoformat(),
+                    'end_time': local_end.isoformat(),
+                    'start_hour': local_start.hour,
+                    'end_hour': local_end.hour,
+                    'is_reasonable': reasonable_start <= local_start.hour <= reasonable_end
+                }
+                
+                # Count reasonable slots
+                if invitee_times[tz]['is_reasonable']:
+                    reasonable_count += 1
+                    
+            except Exception as e:
+                logger.warning(f"Error processing timezone {tz}: {e}")
+                continue
+        
+        # Calculate fairness score
+        fairness_score = reasonable_count / len(invitee_timezones) if invitee_timezones else 1.0
+        
+        # Add enhanced information to slot
+        enhanced_slot = {
+            **slot,
+            'invitee_times': invitee_times,
+            'fairness_score': fairness_score
+        }
+        
+        enhanced_slots.append(enhanced_slot)
+    
+    # Sort by fairness score (highest first)
+    enhanced_slots.sort(key=lambda x: x.get('fairness_score', 0), reverse=True)
+    
+    return enhanced_slots
+
+
+def enhance_slots_with_dst_info(
+    slots: List[Dict[str, Any]], 
+    invitee_timezone: str
+) -> List[Dict[str, Any]]:
+    """Add timezone and DST information to slots."""
+    
+    enhanced_slots = []
+    
+    for slot in slots:
+        try:
+            # Convert to invitee timezone
+            local_start = slot['start_time'].astimezone(ZoneInfo(invitee_timezone))
+            local_end = slot['end_time'].astimezone(ZoneInfo(invitee_timezone))
+            
+            enhanced_slot = {
+                **slot,
+                'local_start_time': local_start,
+                'local_end_time': local_end,
+                'is_dst': bool(local_start.dst()) if local_start.dst() is not None else False
+            }
+            
+            enhanced_slots.append(enhanced_slot)
+            
+        except Exception as e:
+            logger.warning(f"Error enhancing slot with DST info: {e}")
+            enhanced_slots.append(slot)  # Keep original slot
+    
+    return enhanced_slots
+
+
+def merge_overlapping_intervals(intervals: List[Tuple[datetime, datetime]]) -> List[Tuple[datetime, datetime]]:
+    """Merge overlapping or adjacent time intervals."""
+    if not intervals:
+        return []
+    
+    # Sort intervals by start time
+    sorted_intervals = sorted(intervals, key=lambda x: x[0])
+    merged = [sorted_intervals[0]]
+    
+    for current_start, current_end in sorted_intervals[1:]:
+        last_start, last_end = merged[-1]
+        
+        # Check if current interval overlaps or is adjacent to the last one
+        if current_start <= last_end:
+            # Merge intervals
+            merged[-1] = (last_start, max(last_end, current_end))
+        else:
+            # No overlap, add as separate interval
+            merged.append((current_start, current_end))
+    
+    return merged
+
+
+def merge_overlapping_slots(slots: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Merge overlapping or adjacent slots."""
+    if not slots:
+        return []
+    
+    # Sort slots by start time
+    sorted_slots = sorted(slots, key=lambda x: x['start_time'])
+    merged = [sorted_slots[0]]
+    
+    for current_slot in sorted_slots[1:]:
+        last_slot = merged[-1]
+        
+        # Check if current slot is adjacent to the last one
+        if current_slot['start_time'] <= last_slot['end_time']:
+            # Merge slots
+            merged[-1] = {
+                'start_time': last_slot['start_time'],
+                'end_time': max(last_slot['end_time'], current_slot['end_time']),
+                'duration_minutes': int((max(last_slot['end_time'], current_slot['end_time']) - last_slot['start_time']).total_seconds() / 60)
+            }
+        else:
+            # No overlap, add as separate slot
+            merged.append(current_slot)
+    
+    return merged
+
+
+def calculate_timezone_offset_hours(
+    from_timezone: str, 
+    to_timezone: str, 
+    reference_date: Optional[date] = None
+) -> float:
+    """Calculate timezone offset in hours."""
     if reference_date is None:
         reference_date = timezone.now().date()
     
     try:
+        # Create a reference datetime
+        ref_datetime = datetime.combine(reference_date, time(12, 0))
+        
+        # Convert to both timezones
         from_tz = ZoneInfo(from_timezone)
         to_tz = ZoneInfo(to_timezone)
         
-        # Create a reference datetime at noon to avoid DST edge cases
-        reference_dt = datetime.combine(reference_date, time(12, 0)).replace(tzinfo=from_tz)
+        from_dt = ref_datetime.replace(tzinfo=from_tz)
+        to_dt = from_dt.astimezone(to_tz)
         
-        # Convert to target timezone
-        converted_dt = reference_dt.astimezone(to_tz)
-        
-        # Calculate offset in hours
-        offset_seconds = (converted_dt.utcoffset() - reference_dt.utcoffset()).total_seconds()
+        # Calculate offset
+        offset_seconds = (to_dt.utcoffset() - from_dt.utcoffset()).total_seconds()
         return offset_seconds / 3600
         
     except Exception as e:
@@ -1225,176 +639,211 @@ def calculate_timezone_offset_hours(from_timezone, to_timezone, reference_date=N
         return 0.0
 
 
-def find_optimal_slots_for_group(organizer_slots, invitee_timezones, max_slots=10):
-    """
-    Find the most optimal slots for a group meeting across multiple timezones.
-    
-    Args:
-        organizer_slots: List of available slots from organizer
-        invitee_timezones: List of IANA timezone strings
-        max_slots: Maximum number of optimal slots to return
-    
-    Returns:
-        List of slots ranked by how "fair" they are across all timezones
-    """
-    if not invitee_timezones or len(invitee_timezones) <= 1:
-        return organizer_slots[:max_slots]
-    
-    # Use the multi-invitee intersection logic which already includes fairness scoring
-    optimal_slots = calculate_multi_invitee_intersection(
-        organizer_slots, invitee_timezones, invitee_timezones[0]
-    )
-    
-    return optimal_slots[:max_slots]
+# Cache Management Functions
+
+def get_cache_key_for_availability(
+    organizer_id: str,
+    event_type_id: str,
+    start_date: date,
+    end_date: date,
+    invitee_timezone: str,
+    attendee_count: int
+) -> str:
+    """Generate cache key for availability calculation."""
+    key_parts = [
+        'availability',
+        str(organizer_id),
+        str(event_type_id),
+        start_date.isoformat(),
+        end_date.isoformat(),
+        invitee_timezone,
+        str(attendee_count)
+    ]
+    return ':'.join(key_parts)
 
 
-def mark_cache_dirty(organizer_id, cache_type, **kwargs):
-    """
-    Mark cache as dirty for debounced batch invalidation processing.
-def mark_cache_dirty(organizer_id, cache_type='general', requires_full_invalidation=False, **kwargs):
-    This replaces direct cache clearing to prevent race conditions and
-    Mark cache as dirty for an organizer with detailed change tracking.
+def mark_cache_dirty(
+    organizer_id: str,
+    cache_type: str,
+    requires_full_invalidation: bool = False,
+    **kwargs
+) -> None:
+    """Mark an organizer's cache as dirty for later processing."""
     
-    Args:
-        organizer_id: UUID of the organizer
-        cache_type: Type of change that triggered the dirty flag
-        requires_full_invalidation: Whether this change requires full cache invalidation
-        **kwargs: Additional parameters for specific dirty flag types
-    """
-    # Use a global dirty set to track all organizers with dirty cache
-    global_dirty_key = "dirty_cache_organizers"
-    organizer_dirty_key = f"dirty_cache:{organizer_id}"
+    dirty_key = f"dirty_cache:{organizer_id}"
     
-    # Add organizer to global dirty set
-    cache.sadd(global_dirty_key, str(organizer_id))
-    cache.expire(global_dirty_key, 3600)  # Expire in 1 hour
-    
-    # Get existing dirty data for this organizer or create new
-    dirty_data = cache.get(organizer_dirty_key, {
-        'organizer_id': str(organizer_id),
-        'changes': [],
-        'last_updated': timezone.now().isoformat(),
-        'requires_full_invalidation': False
+    # Get existing dirty data or create new
+    dirty_data = cache.get(dirty_key, {
+        'organizer_id': organizer_id,
+        'requires_full_invalidation': False,
+        'changes': []
     })
     
-    # Add new change
-    change_entry = {
+    # Update dirty data
+    if requires_full_invalidation:
+        dirty_data['requires_full_invalidation'] = True
+    
+    # Add change details
+    change_data = {
         'cache_type': cache_type,
         'timestamp': timezone.now().isoformat(),
         **kwargs
     }
-    dirty_data['changes'].append(change_entry)
-    dirty_data['last_updated'] = timezone.now().isoformat()
+    dirty_data['changes'].append(change_data)
     
-    # Determine if this change requires full invalidation
-    full_invalidation_types = ['buffer_time_change', 'event_type_change']
-    if cache_type in full_invalidation_types:
-        dirty_data['requires_full_invalidation'] = True
+    # Store dirty data
+    cache.set(dirty_key, dirty_data, timeout=3600)  # 1 hour timeout
     
-    # Store dirty flag for 30 minutes (enough time for batch processing)
-    cache.set(organizer_dirty_key, dirty_data, timeout=1800)
-    
-    logger.debug(f"Marked cache dirty for organizer {organizer_id}: {cache_type}")
+    # Add to dirty organizers list
+    dirty_list_key = "dirty_cache_list"
+    dirty_organizers = cache.get(dirty_list_key, set())
+    dirty_organizers.add(organizer_id)
+    cache.set(dirty_list_key, dirty_organizers, timeout=3600)
 
 
-def get_dirty_organizers():
-    """
-    Get list of organizer IDs with dirty cache flags.
-    
-    Returns:
-        List of organizer ID strings that need cache refresh
-    """
-    global_dirty_key = "dirty_cache_organizers"
-    try:
-        # Get all organizer IDs from the dirty set
-        dirty_organizer_ids = cache.smembers(global_dirty_key)
-        return [oid.decode('utf-8') if isinstance(oid, bytes) else str(oid) for oid in dirty_organizer_ids]
-    except Exception as e:
-        logger.error(f"Error getting dirty organizers: {e}")
-        return []
+def get_dirty_organizers() -> List[str]:
+    """Get list of organizers with dirty cache flags."""
+    dirty_list_key = "dirty_cache_list"
+    dirty_organizers = cache.get(dirty_list_key, set())
+    return list(dirty_organizers)
 
 
-def clear_dirty_flags(organizer_id):
-    """Clear dirty flags for an organizer after processing."""
-    global_dirty_key = "dirty_cache_organizers"
-    organizer_dirty_key = f"dirty_cache:{organizer_id}"
+def clear_dirty_flags(organizer_id: str) -> None:
+    """Clear dirty cache flags for an organizer."""
+    # Remove detailed dirty data
+    dirty_key = f"dirty_cache:{organizer_id}"
+    cache.delete(dirty_key)
     
-    # Remove from global dirty set
-    cache.srem(global_dirty_key, str(organizer_id))
-    
-    # Remove organizer-specific dirty data
-    cache.delete(organizer_dirty_key)
-    
-    logger.debug(f"Cleared dirty flags for organizer {organizer_id}")
+    # Remove from dirty list
+    dirty_list_key = "dirty_cache_list"
+    dirty_organizers = cache.get(dirty_list_key, set())
+    dirty_organizers.discard(organizer_id)
+    cache.set(dirty_list_key, dirty_organizers, timeout=3600)
 
 
-def get_cache_key_for_availability(organizer_id, event_type_id, start_date, end_date, 
-                                 invitee_timezone='UTC', attendee_count=1):
-    """
-    Generate a consistent cache key for availability data.
+def generate_cache_key_patterns_for_invalidation(
+    organizer_id: str,
+    event_type_id: Optional[str] = None,
+    date_range: Optional[Tuple[date, date]] = None
+) -> List[str]:
+    """Generate cache key patterns for wildcard invalidation."""
+    patterns = []
     
-    Args:
-        organizer_id: UUID of the organizer
-        event_type_id: UUID of the event type
-        start_date: Start date for availability
-        end_date: End date for availability
-        invitee_timezone: Timezone for the invitee
-        attendee_count: Number of attendees
+    if event_type_id and date_range:
+        # Most specific: organizer + event type + date range
+        start_date, end_date = date_range
+        current_date = start_date
+        while current_date <= end_date:
+            date_str = current_date.isoformat()
+            patterns.append(f"availability:{organizer_id}:{event_type_id}:{date_str}*")
+            current_date += timedelta(days=1)
+    elif event_type_id:
+        # Organizer + specific event type, all dates
+        patterns.append(f"availability:{organizer_id}:{event_type_id}:*")
+    elif date_range:
+        # Organizer + all event types + specific date range
+        start_date, end_date = date_range
+        current_date = start_date
+        while current_date <= end_date:
+            date_str = current_date.isoformat()
+            patterns.append(f"availability:{organizer_id}:*:{date_str}*")
+            current_date += timedelta(days=1)
+    else:
+        # Broadest: all cache for this organizer
+        patterns.append(f"availability:{organizer_id}:*")
     
-    Returns:
-        String cache key
-    """
-    return f"availability:{organizer_id}:{event_type_id}:{start_date}:{end_date}:{invitee_timezone}:{attendee_count}"
+    return patterns
 
 
-def get_weekly_cache_keys_for_date_range(organizer_id, event_type_id, start_date, end_date):
-    """
-    Generate weekly cache keys that cover a date range.
-    
-    Args:
-        organizer_id: UUID of the organizer
-        event_type_id: UUID of the event type
-        start_date: Start date
-        end_date: End date
-    
-    Returns:
-        List of cache key patterns
-    """
+def get_weekly_cache_keys_for_date_range(
+    organizer_id: str,
+    start_date: date,
+    end_date: date
+) -> List[str]:
+    """Get cache keys for weekly chunks within a date range."""
     cache_keys = []
     current_date = start_date
     
     while current_date <= end_date:
-        # Calculate week boundaries
+        # Find start of week (Monday)
         week_start = current_date - timedelta(days=current_date.weekday())
         week_end = week_start + timedelta(days=6)
         
         # Generate base cache key for this week
-        base_key = f"availability:{organizer_id}:{event_type_id}:{week_start}:{week_end}"
+        base_key = f"availability:{organizer_id}:*:{week_start}:{week_end}"
         cache_keys.append(base_key)
         
         # Move to next week
         current_date = week_end + timedelta(days=1)
     
-    return cache_keys
+    return list(set(cache_keys))  # Remove duplicates
 
 
-def generate_cache_key_variations(base_key):
-    """
-    Generate variations of a cache key to handle different timezone/attendee combinations.
+def generate_cache_key_variations(base_key: str) -> List[str]:
+    """Generate variations of a cache key for comprehensive invalidation."""
+    variations = [base_key]
     
-    Args:
-        base_key: Base cache key pattern
+    # Add common timezone variations
+    common_timezones = getattr(settings, 'AVAILABILITY_COMMON_TIMEZONES', ['UTC'])
+    common_attendee_counts = getattr(settings, 'AVAILABILITY_COMMON_ATTENDEE_COUNTS', [1])
     
-    Returns:
-        List of cache key variations to clear
-    """
-    # Common timezone variations
-    common_timezones = ['UTC', 'America/New_York', 'Europe/London', 'Asia/Tokyo', 'America/Los_Angeles']
-    attendee_counts = [1, 2, 3, 4, 5]  # Common attendee counts
-    
-    variations = []
     for tz in common_timezones:
-        for count in attendee_counts:
-            variations.append(f"{base_key}:{tz}:{count}")
+        for count in common_attendee_counts:
+            variation = f"{base_key}:{tz}:{count}"
+            variations.append(variation)
     
     return variations
+
+
+def is_slot_blocked_by_override(
+    organizer: User,
+    event_type: 'EventType',
+    slot: Dict[str, Any],
+    target_date: date
+) -> bool:
+    """Check if a slot is blocked by date override rules."""
+    from .models import DateOverrideRule
+    
+    # Get date overrides for the target date
+    date_overrides = DateOverrideRule.objects.filter(
+        organizer=organizer,
+        date=target_date,
+        is_active=True
+    )
+    
+    # Filter overrides that apply to this event type
+    applicable_overrides = [
+        override for override in date_overrides
+        if override.applies_to_event_type(event_type)
+    ]
+    
+    if not applicable_overrides:
+        return False
+    
+    slot_start = slot['start_time']
+    slot_end = slot['end_time']
+    
+    for override in applicable_overrides:
+        if not override.is_available:
+            # Entire day is blocked
+            return True
+        
+        if override.start_time and override.end_time:
+            # Check if slot is within allowed time range
+            override_start = datetime.combine(target_date, override.start_time)
+            override_end = datetime.combine(target_date, override.end_time)
+            
+            # Handle midnight spanning
+            if override.spans_midnight():
+                override_end += timedelta(days=1)
+            
+            # Add timezone info to match slot times
+            if slot_start.tzinfo:
+                override_start = override_start.replace(tzinfo=slot_start.tzinfo)
+                override_end = override_end.replace(tzinfo=slot_start.tzinfo)
+            
+            # Slot is blocked if it's OUTSIDE the allowed override range
+            if not (override_start <= slot_start and slot_end <= override_end):
+                return True
+    
+    return False

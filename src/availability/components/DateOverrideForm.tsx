@@ -249,7 +249,7 @@ export const DateOverrideForm: React.FC<DateOverrideFormProps> = ({
                               const eventType = eventTypes.find(et => et.id === value);
                               return (
                                 <Chip
-                                  key={value}
+                                  key={eventType?.id || value}
                                   label={eventType?.name || value}
                                   size="small"
                                 />

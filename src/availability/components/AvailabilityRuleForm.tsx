@@ -260,7 +260,7 @@ export const AvailabilityRuleForm: React.FC<AvailabilityRuleFormProps> = ({
                               const eventType = eventTypes.find(et => et.id === value);
                               return (
                                 <Chip
-                                  key={value}
+                                  key={eventType?.id || value}
                                   label={eventType?.name || value}
                                   size="small"
                                 />

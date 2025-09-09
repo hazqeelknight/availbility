@@ -20,47 +20,19 @@ import {
   useAvailabilityRules,
   useDeleteAvailabilityRule,
 } from '../hooks/useAvailabilityApi';
+import { useEventTypes } from '@/events/hooks/useEventTypes'; // Import the new hook
+import { useEventTypes } from '@/events/hooks/useEventTypes'; // Import the new hook
 import { sortAvailabilityRules, getWeekdayName } from '../utils';
 import type { AvailabilityRule } from '../types';
 
 const AvailabilityRules: React.FC = () => {
   const { data: rules, isLoading, error } = useAvailabilityRules();
   const deleteRule = useDeleteAvailabilityRule();
-
-  // Debug logging to understand why rules aren't appearing
-  React.useEffect(() => {
-    console.log('AvailabilityRules - rules data:', rules);
-    console.log('AvailabilityRules - rules length:', rules?.length);
-    console.log('AvailabilityRules - isLoading:', isLoading);
-    console.log('AvailabilityRules - error:', error);
-  }, [rules, isLoading, error]);
-
-  const [formOpen, setFormOpen] = React.useState(false);
-  const [editingRule, setEditingRule] = React.useState<AvailabilityRule | undefined>();
-  const [deleteDialogOpen, setDeleteDialogOpen] = React.useState(false);
-  const [deletingRule, setDeletingRule] = React.useState<AvailabilityRule | undefined>();
-
-  // Mock event types - in real implementation, this would come from Events module
-  const eventTypes = [
-    { id: '1', name: '30 Min Meeting' },
-    { id: '2', name: 'Consultation' },
-    { id: '3', name: 'Demo Call' },
-  ];
-
-  const handleCreate = () => {
-    setEditingRule(undefined);
-    setFormOpen(true);
   };
 
   const handleEdit = (rule: AvailabilityRule) => {
     setEditingRule(rule);
-    setFormOpen(true);
-  };
-
-  const handleDelete = (rule: AvailabilityRule) => {
-    setDeletingRule(rule);
-    setDeleteDialogOpen(true);
-  };
+  const { data: eventTypes, isLoading: eventTypesLoading } = useEventTypes();
 
   const confirmDelete = async () => {
     if (deletingRule) {
@@ -70,12 +42,12 @@ const AvailabilityRules: React.FC = () => {
     }
   };
 
-  const handleFormClose = () => {
+  if (isLoading || eventTypesLoading) {
     setFormOpen(false);
     setEditingRule(undefined);
   };
 
-  if (isLoading) {
+  if (isLoading || eventTypesLoading) {
     return <LoadingSpinner fullScreen message="Loading availability rules..." />;
   }
 
@@ -160,7 +132,7 @@ const AvailabilityRules: React.FC = () => {
         open={formOpen}
         onClose={handleFormClose}
         rule={editingRule}
-        eventTypes={eventTypes}
+        eventTypes={eventTypes || []}
         existingRules={rules || []}
       />
 

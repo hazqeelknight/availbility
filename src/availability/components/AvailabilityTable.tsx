@@ -263,7 +263,7 @@ export const AvailabilityTable = <T extends TableData>({
   if (data.length === 0) {
     return (
       <Paper sx={{ p: 4, textAlign: 'center' }}>
-        <Typography variant="body1" color="text.secondary">
+        <Typography variant="body1" color="text.secondary" sx={{ textTransform: 'capitalize' }}>
           No {type.replace('-', ' ')} configured yet.
         </Typography>
       </Paper>

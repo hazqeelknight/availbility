@@ -262,10 +262,214 @@ export const RecurringBlockedTimeForm: React.FC<RecurringBlockedTimeFormProps> =
               </Grid>
 
               {timeRangeError && (
+                <Alert severity="info">
+                  This block spans midnight. This is allowed for overnight blocks.
+                </Alert>
+              )}
+
+              {isOverlapping && overlappingBlock && (
+                <Grid item xs={12}>
+                  <Alert severity="error">
+                <Alert severity="info">
+                  This block spans midnight. This is allowed for overnight blocks.
+                </Alert>
+              )}
+
+              {isOverlapping && overlappingBlock && (
+                <Grid item xs={12}>
+                  <Alert severity="error">
                     This time range overlaps with existing recurring block "{overlappingBlock.name}" 
                     on {getWeekdayName(overlappingBlock.day_of_week)} from {formatTimeForDisplay(overlappingBlock.start_time)} 
-                    This block spans midnight. This is allowed for overnight blocks.
+                    to {formatTimeForDisplay(overlappingBlock.end_time)}.
                   </Alert>
+                </Grid>
+              )}
+
+              <Grid item xs={12} md={6}>
+                <Controller
+                  name="start_date"
+                  control={control}
+                  render={({ field }) => (
+                    <DatePicker
+                      {...field}
+                      label="Start Date (Optional)"
+                      value={field.value ? new Date(field.value) : null}
+                      onChange={(newValue) => {
+                        if (newValue) {
+                          field.onChange(newValue.toISOString().split('T')[0]);
+                        } else {
+                          field.onChange('');
+                        }
+                      }}
+                      slotProps={{
+                        textField: {
+                          fullWidth: true,
+                          helperText: 'When this recurring block starts (leave empty for indefinite)',
+                        },
+                      }}
+                    />
+                  )}
+                />
+              </Grid>
+
+              <Grid item xs={12} md={6}>
+                <Controller
+                  name="end_date"
+                  control={control}
+                  rules={{
+                    validate: () => !dateRangeError || dateRangeError,
+                  }}
+                  render={({ field }) => (
+                    <DatePicker
+                      {...field}
+                      label="End Date (Optional)"
+                      value={field.value ? new Date(field.value) : null}
+                      onChange={(newValue) => {
+                        if (newValue) {
+                          field.onChange(newValue.toISOString().split('T')[0]);
+                        } else {
+                          field.onChange('');
+                        }
+                      }}
+                      slotProps={{
+                        textField: {
+                          fullWidth: true,
+                          error: !!dateRangeError,
+                          helperText: dateRangeError || 'When this recurring block ends (leave empty for indefinite)',
+                        },
+                      }}
+                    />
+                  )}
+                />
+              </Grid>
+
+              <Grid item xs={12}>
+                <Controller
+                  name="is_active"
+                  control={control}
+                  render={({ field }) => (
+                    <FormControlLabel
+                      control={<Switch {...field} checked={field.value} />}
+                      label="Active"
+                    />
+                  )}
+                />
+              </Grid>
+            </Grid>
+          </Box>
+        </LocalizationProvider>
+      </DialogContent>
+
+      <DialogActions>
+        <Button onClick={onClose} variant="outlined">
+          Cancel
+        </Button>
+        <Button
+          onClick={handleSubmit(onSubmit)}
+          variant="contained"
+          loading={createRecurringBlock.isPending || updateRecurringBlock.isPending}
+          disabled={!!timeRangeError || !!dateRangeError || isOverlapping}
+        >
+          {recurringBlock ? 'Update' : 'Create'}
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
+};
+                </Grid>
+              )}
+
+              <Grid item xs={12} md={6}>
+                <Controller
+                  name="start_date"
+                  control={control}
+                  render={({ field }) => (
+                    <DatePicker
+                      {...field}
+                      label="Start Date (Optional)"
+                      value={field.value ? new Date(field.value) : null}
+                      onChange={(newValue) => {
+                        if (newValue) {
+                          field.onChange(newValue.toISOString().split('T')[0]);
+                        } else {
+                          field.onChange('');
+                        }
+                      }}
+                      slotProps={{
+                        textField: {
+                          fullWidth: true,
+                          helperText: 'When this recurring block starts (leave empty for indefinite)',
+                        },
+                      }}
+                    />
+                  )}
+                />
+              </Grid>
+
+              <Grid item xs={12} md={6}>
+                <Controller
+                  name="end_date"
+                  control={control}
+                  rules={{
+                    validate: () => !dateRangeError || dateRangeError,
+                  }}
+                  render={({ field }) => (
+                    <DatePicker
+                      {...field}
+                      label="End Date (Optional)"
+                      value={field.value ? new Date(field.value) : null}
+                      onChange={(newValue) => {
+                        if (newValue) {
+                          field.onChange(newValue.toISOString().split('T')[0]);
+                        } else {
+                          field.onChange('');
+                        }
+                      }}
+                      slotProps={{
+                        textField: {
+                          fullWidth: true,
+                          error: !!dateRangeError,
+                          helperText: dateRangeError || 'When this recurring block ends (leave empty for indefinite)',
+                        },
+                      }}
+                    />
+                  )}
+                />
+              </Grid>
+
+              <Grid item xs={12}>
+                <Controller
+                  name="is_active"
+                  control={control}
+                  render={({ field }) => (
+                    <FormControlLabel
+                      control={<Switch {...field} checked={field.value} />}
+                      label="Active"
+                    />
+                  )}
+                />
+              </Grid>
+            </Grid>
+          </Box>
+        </LocalizationProvider>
+      </DialogContent>
+
+      <DialogActions>
+        <Button onClick={onClose} variant="outlined">
+          Cancel
+        </Button>
+        <Button
+          onClick={handleSubmit(onSubmit)}
+          variant="contained"
+          loading={createRecurringBlock.isPending || updateRecurringBlock.isPending}
+          disabled={!!timeRangeError || !!dateRangeError || isOverlapping}
+        >
+          {recurringBlock ? 'Update' : 'Create'}
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
+};
                 </Grid>
               )}
 

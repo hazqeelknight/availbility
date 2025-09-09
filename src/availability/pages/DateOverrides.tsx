@@ -22,32 +22,20 @@ import {
   useDateOverrideRules,
   useDeleteDateOverrideRule,
 } from '../hooks/useAvailabilityApi';
+import { useEventTypes } from '@/events/hooks/useEventTypes'; // Import the new hook
+import { useEventTypes } from '@/events/hooks/useEventTypes'; // Import the new hook
 import { formatDateForDisplay } from '../utils';
 import type { DateOverrideRule } from '../types';
 
 const DateOverrides: React.FC = () => {
   const { data: overrides, isLoading, error } = useDateOverrideRules();
   const deleteOverride = useDeleteDateOverrideRule();
-
-  const [formOpen, setFormOpen] = React.useState(false);
   const [editingOverride, setEditingOverride] = React.useState<DateOverrideRule | undefined>();
   const [deleteDialogOpen, setDeleteDialogOpen] = React.useState(false);
   const [deletingOverride, setDeletingOverride] = React.useState<DateOverrideRule | undefined>();
   const [tabValue, setTabValue] = React.useState(0);
-
-  // Mock event types - in real implementation, this would come from Events module
-  const eventTypes = [
-    { id: '1', name: '30 Min Meeting' },
-    { id: '2', name: 'Consultation' },
-    { id: '3', name: 'Demo Call' },
-  ];
-
-  const handleCreate = () => {
-    setEditingOverride(undefined);
-    setFormOpen(true);
-  };
-
-  const handleEdit = (override: DateOverrideRule) => {
+  const { data: eventTypes, isLoading: eventTypesLoading } = useEventTypes();
+  const { data: eventTypes, isLoading: eventTypesLoading } = useEventTypes();
     setEditingOverride(override);
     setFormOpen(true);
   };
@@ -70,7 +58,7 @@ const DateOverrides: React.FC = () => {
     setEditingOverride(undefined);
   };
 
-  if (isLoading) {
+  if (isLoading || eventTypesLoading) {
     return <LoadingSpinner fullScreen message="Loading date overrides..." />;
   }
 
@@ -180,7 +168,7 @@ const DateOverrides: React.FC = () => {
         open={formOpen}
         onClose={handleFormClose}
         override={editingOverride}
-        eventTypes={eventTypes}
+        eventTypes={eventTypes || []}
       />
 
       {/* Delete Confirmation Dialog */}

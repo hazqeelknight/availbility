@@ -6,10 +6,12 @@ from datetime import datetime, timedelta
 from .utils import (
     calculate_available_slots, get_cache_key_for_availability, 
     get_weekly_cache_keys_for_date_range, generate_cache_key_variations,
-    get_dirty_organizers, clear_dirty_flags, are_time_intervals_overlapping
+    get_dirty_organizers, clear_dirty_flags, are_time_intervals_overlapping,
+    generate_cache_key_patterns_for_invalidation
 )
 from apps.users.models import User
 from apps.events.models import EventType
+from django.db import models
 import logging
 
 logger = logging.getLogger(__name__)
@@ -546,6 +548,26 @@ def validate_availability_data_integrity():
     return f"Data integrity check completed. Found {len(issues_found)} issues."
 
 
+def _get_rule_intervals(rule):
+    """
+    Get time intervals for a rule, splitting midnight-spanning rules.
+    
+    Args:
+        rule: AvailabilityRule instance
+        
+    Returns:
+        List of (start_time, end_time) tuples
+    """
+    if rule.spans_midnight():
+        # Split into two intervals: start_time to midnight, midnight to end_time
+        return [
+            (rule.start_time, time(23, 59, 59)),
+            (time(0, 0, 0), rule.end_time)
+        ]
+    else:
+        return [(rule.start_time, rule.end_time)]
+
+
 def _rules_overlap(rule1, rule2):
     """
     Check if two availability rules overlap in time.
@@ -574,54 +596,3 @@ def _rules_overlap(rule1, rule2):
                 ):
                     return True
         return False
-    
-    # Normal rules - check for time overlap
-    return are_time_intervals_overlapping(
-        rule1.start_time.strftime('%H:%M:%S'),
-        rule1.end_time.strftime('%H:%M:%S'),
-        rule2.start_time.strftime('%H:%M:%S'),
-        rule2.end_time.strftime('%H:%M:%S'),
-        allow_adjacency=True
-def generate_cache_key_patterns_for_invalidation(organizer_id, event_type_id=None, date_range=None):
-    """
-    Generate cache key patterns for wildcard invalidation.
-    
-    This replaces the flawed generate_cache_key_variations approach with
-    pattern-based invalidation that doesn't rely on hardcoded lists.
-    
-    Args:
-        organizer_id: UUID of the organizer
-        event_type_id: UUID of the event type (optional, None for all event types)
-        date_range: tuple of (start_date, end_date) (optional, None for all dates)
-    
-    Returns:
-        List of Redis key patterns for deletion
-    """
-    patterns = []
-    
-    if event_type_id and date_range:
-        # Most specific: organizer + event type + date range
-        start_date, end_date = date_range
-        current_date = start_date
-        while current_date <= end_date:
-            date_str = current_date.isoformat()
-            patterns.append(f"availability:{organizer_id}:{event_type_id}:{date_str}*")
-            current_date += timedelta(days=1)
-    elif event_type_id:
-        # Organizer + specific event type, all dates
-        patterns.append(f"availability:{organizer_id}:{event_type_id}:*")
-    elif date_range:
-        # Organizer + all event types + specific date range
-        start_date, end_date = date_range
-        current_date = start_date
-        while current_date <= end_date:
-            date_str = current_date.isoformat()
-            patterns.append(f"availability:{organizer_id}:*:{date_str}*")
-            current_date += timedelta(days=1)
-    else:
-        # Broadest: all cache for this organizer
-        patterns.append(f"availability:{organizer_id}:*")
-    
-    return patterns
-    else:
-        return [(rule.start_time, rule.end_time)]

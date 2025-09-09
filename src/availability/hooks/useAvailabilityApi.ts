@@ -48,7 +48,9 @@ export const useCreateAvailabilityRule = () => {
   return useMutation({
     mutationFn: (data: CreateAvailabilityRulePayload) => availabilityRulesApi.create(data),
     onSuccess: () => {
+      // Force refetch of availability rules to ensure UI updates
       queryClient.invalidateQueries({ queryKey: queryKeys.availability.rules() });
+      queryClient.refetchQueries({ queryKey: queryKeys.availability.rules() });
       queryClient.invalidateQueries({ queryKey: queryKeys.availability.stats() });
       toast.success('Availability rule created successfully');
     },

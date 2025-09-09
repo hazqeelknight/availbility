@@ -250,9 +250,6 @@ const AvailabilityOverview: React.FC = () => {
               </CardContent>
             </Card>
           </Grid>
-    </>
-  );
-};
 
           {/* Getting Started */}
           {(!rules || rules.length === 0) && (
@@ -277,4 +274,8 @@ const AvailabilityOverview: React.FC = () => {
           )}
         </Grid>
       </motion.div>
+    </>
+  );
+};
+
 export default AvailabilityOverview;

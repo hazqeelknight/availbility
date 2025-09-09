@@ -26,7 +26,13 @@ import type {
 export const availabilityRulesApi = {
   getAll: async (): Promise<AvailabilityRule[]> => {
     const response = await api.get('/availability/rules/');
-    return response.data;
+    // Defensive check to ensure we always return an array
+    if (Array.isArray(response.data)) {
+      return response.data;
+    } else {
+      console.warn('API returned non-array data for availability rules:', response.data);
+      return [];
+    }
   },
 
   getById: async (id: string): Promise<AvailabilityRule> => {
@@ -53,7 +59,13 @@ export const availabilityRulesApi = {
 export const dateOverrideRulesApi = {
   getAll: async (): Promise<DateOverrideRule[]> => {
     const response = await api.get('/availability/overrides/');
-    return response.data;
+    // Defensive check to ensure we always return an array
+    if (Array.isArray(response.data)) {
+      return response.data;
+    } else {
+      console.warn('API returned non-array data for date override rules:', response.data);
+      return [];
+    }
   },
 
   getById: async (id: string): Promise<DateOverrideRule> => {
@@ -80,7 +92,13 @@ export const dateOverrideRulesApi = {
 export const recurringBlockedTimesApi = {
   getAll: async (): Promise<RecurringBlockedTime[]> => {
     const response = await api.get('/availability/recurring-blocks/');
-    return response.data;
+    // Defensive check to ensure we always return an array
+    if (Array.isArray(response.data)) {
+      return response.data;
+    } else {
+      console.warn('API returned non-array data for recurring blocked times:', response.data);
+      return [];
+    }
   },
 
   getById: async (id: string): Promise<RecurringBlockedTime> => {
@@ -107,7 +125,13 @@ export const recurringBlockedTimesApi = {
 export const blockedTimesApi = {
   getAll: async (): Promise<BlockedTime[]> => {
     const response = await api.get('/availability/blocked/');
-    return response.data;
+    // Defensive check to ensure we always return an array
+    if (Array.isArray(response.data)) {
+      return response.data;
+    } else {
+      console.warn('API returned non-array data for blocked times:', response.data);
+      return [];
+    }
   },
 
   getById: async (id: string): Promise<BlockedTime> => {

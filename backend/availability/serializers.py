@@ -6,7 +6,7 @@ from .utils import validate_timezone
 class AvailabilityRuleSerializer(serializers.ModelSerializer):
     day_of_week_display = serializers.CharField(source='get_day_of_week_display', read_only=True)
     event_types_count = serializers.IntegerField(source='event_types.count', read_only=True)
-    spans_midnight = serializers.BooleanField(source='spans_midnight', read_only=True)
+    spans_midnight = serializers.BooleanField(read_only=True)
     
     class Meta:
         model = AvailabilityRule
@@ -31,7 +31,7 @@ class AvailabilityRuleSerializer(serializers.ModelSerializer):
 
 class DateOverrideRuleSerializer(serializers.ModelSerializer):
     event_types_count = serializers.IntegerField(source='event_types.count', read_only=True)
-    spans_midnight = serializers.BooleanField(source='spans_midnight', read_only=True)
+    spans_midnight = serializers.BooleanField(read_only=True)
     
     class Meta:
         model = DateOverrideRule
@@ -60,7 +60,7 @@ class DateOverrideRuleSerializer(serializers.ModelSerializer):
 
 class RecurringBlockedTimeSerializer(serializers.ModelSerializer):
     day_of_week_display = serializers.CharField(source='get_day_of_week_display', read_only=True)
-    spans_midnight = serializers.BooleanField(source='spans_midnight', read_only=True)
+    spans_midnight = serializers.BooleanField(read_only=True)
     
     class Meta:
         model = RecurringBlockedTime

@@ -27,6 +27,14 @@ const AvailabilityRules: React.FC = () => {
   const { data: rules, isLoading, error } = useAvailabilityRules();
   const deleteRule = useDeleteAvailabilityRule();
 
+  // Debug logging to understand why rules aren't appearing
+  React.useEffect(() => {
+    console.log('AvailabilityRules - rules data:', rules);
+    console.log('AvailabilityRules - rules length:', rules?.length);
+    console.log('AvailabilityRules - isLoading:', isLoading);
+    console.log('AvailabilityRules - error:', error);
+  }, [rules, isLoading, error]);
+
   const [formOpen, setFormOpen] = React.useState(false);
   const [editingRule, setEditingRule] = React.useState<AvailabilityRule | undefined>();
   const [deleteDialogOpen, setDeleteDialogOpen] = React.useState(false);
@@ -153,6 +161,7 @@ const AvailabilityRules: React.FC = () => {
         onClose={handleFormClose}
         rule={editingRule}
         eventTypes={eventTypes}
+        existingRules={rules || []}
       />
 
       {/* Delete Confirmation Dialog */}

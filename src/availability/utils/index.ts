@@ -246,6 +246,63 @@ export const sortAvailabilityRules = <T extends { day_of_week: number; start_tim
 };
 
 /**
+ * Convert time string to minutes from midnight
+ */
+export const timeToMinutes = (timeString: string): number => {
+  if (!timeString) return 0;
+  const [hours, minutes] = timeString.split(':').map(Number);
+  return hours * 60 + minutes;
+};
+
+/**
+ * Check if a new rule overlaps with existing rules
+ */
+export const checkRuleOverlap = (
+  newRule: { day_of_week: number; start_time: string; end_time: string },
+  existingRules: Array<{ id: string; day_of_week: number; start_time: string; end_time: string; is_active: boolean }>,
+  currentRuleId?: string
+): { hasOverlap: boolean; overlappingRule?: any } => {
+  const newStartMinutes = timeToMinutes(newRule.start_time);
+  const newEndMinutes = timeToMinutes(newRule.end_time);
+  const newDay = newRule.day_of_week;
+
+  // Handle midnight spanning for new rule
+  const newSpansMiddnight = newEndMinutes < newStartMinutes;
+  const adjustedNewEndMinutes = newSpansMiddnight ? newEndMinutes + 24 * 60 : newEndMinutes;
+
+  for (const existingRule of existingRules) {
+    // Skip the rule being edited and inactive rules
+    if ((currentRuleId && existingRule.id === currentRuleId) || !existingRule.is_active) {
+      continue;
+    }
+
+    // Only check rules on the same day
+    if (existingRule.day_of_week === newDay) {
+      const existingStartMinutes = timeToMinutes(existingRule.start_time);
+      const existingEndMinutes = timeToMinutes(existingRule.end_time);
+
+      // Handle midnight spanning for existing rule
+      const existingSpansMiddnight = existingEndMinutes < existingStartMinutes;
+      const adjustedExistingEndMinutes = existingSpansMiddnight ? existingEndMinutes + 24 * 60 : existingEndMinutes;
+
+      // Check for overlap using interval intersection logic
+      // Two intervals [a,b] and [c,d] overlap if: max(a,c) < min(b,d)
+      const overlapStart = Math.max(newStartMinutes, existingStartMinutes);
+      const overlapEnd = Math.min(adjustedNewEndMinutes, adjustedExistingEndMinutes);
+
+      if (overlapStart < overlapEnd) {
+        return {
+          hasOverlap: true,
+          overlappingRule: existingRule,
+        };
+      }
+    }
+  }
+
+  return { hasOverlap: false };
+};
+
+/**
  * Group blocked times by date
  */
 export const groupBlockedTimesByDate = <T extends { start_datetime: string }>(blockedTimes: T[]): Record<string, T[]> => {

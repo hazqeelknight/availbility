@@ -106,7 +106,7 @@ class RecurringBlockedTimeSerializer(serializers.ModelSerializer):
                 if self._time_ranges_overlap(start_time, end_time, existing_block.start_time, existing_block.end_time):
                     raise serializers.ValidationError(
                         f"This time range overlaps with existing recurring block '{existing_block.name}' "
-                        f"({existing_block.start_time} - {existing_block.end_time})"
+                        f"({existing_block.start_time.strftime('%H:%M')} - {existing_block.end_time.strftime('%H:%M')})"
                     )
         
         return attrs

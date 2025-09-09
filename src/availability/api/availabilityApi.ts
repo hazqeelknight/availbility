@@ -26,11 +26,14 @@ import type {
 export const availabilityRulesApi = {
   getAll: async (): Promise<AvailabilityRule[]> => {
     const response = await api.get('/availability/rules/');
-    // Defensive check to ensure we always return an array
-    if (Array.isArray(response.data)) {
+    // Handle paginated response structure
+    if (response.data && Array.isArray(response.data.results)) {
+      return response.data.results;
+    } else if (Array.isArray(response.data)) {
+      // Fallback for non-paginated responses
       return response.data;
     } else {
-      console.warn('API returned non-array data for availability rules:', response.data);
+      console.warn('API returned unexpected data structure for availability rules:', response.data);
       return [];
     }
   },
@@ -59,11 +62,14 @@ export const availabilityRulesApi = {
 export const dateOverrideRulesApi = {
   getAll: async (): Promise<DateOverrideRule[]> => {
     const response = await api.get('/availability/overrides/');
-    // Defensive check to ensure we always return an array
-    if (Array.isArray(response.data)) {
+    // Handle paginated response structure
+    if (response.data && Array.isArray(response.data.results)) {
+      return response.data.results;
+    } else if (Array.isArray(response.data)) {
+      // Fallback for non-paginated responses
       return response.data;
     } else {
-      console.warn('API returned non-array data for date override rules:', response.data);
+      console.warn('API returned unexpected data structure for date override rules:', response.data);
       return [];
     }
   },
@@ -92,11 +98,14 @@ export const dateOverrideRulesApi = {
 export const recurringBlockedTimesApi = {
   getAll: async (): Promise<RecurringBlockedTime[]> => {
     const response = await api.get('/availability/recurring-blocks/');
-    // Defensive check to ensure we always return an array
-    if (Array.isArray(response.data)) {
+    // Handle paginated response structure
+    if (response.data && Array.isArray(response.data.results)) {
+      return response.data.results;
+    } else if (Array.isArray(response.data)) {
+      // Fallback for non-paginated responses
       return response.data;
     } else {
-      console.warn('API returned non-array data for recurring blocked times:', response.data);
+      console.warn('API returned unexpected data structure for recurring blocked times:', response.data);
       return [];
     }
   },
@@ -125,11 +134,14 @@ export const recurringBlockedTimesApi = {
 export const blockedTimesApi = {
   getAll: async (): Promise<BlockedTime[]> => {
     const response = await api.get('/availability/blocked/');
-    // Defensive check to ensure we always return an array
-    if (Array.isArray(response.data)) {
+    // Handle paginated response structure
+    if (response.data && Array.isArray(response.data.results)) {
+      return response.data.results;
+    } else if (Array.isArray(response.data)) {
+      // Fallback for non-paginated responses
       return response.data;
     } else {
-      console.warn('API returned non-array data for blocked times:', response.data);
+      console.warn('API returned unexpected data structure for blocked times:', response.data);
       return [];
     }
   },

@@ -402,3 +402,69 @@ export const timeRangesOverlap = (
   
   return start1TotalMinutes < end2TotalMinutes && end1TotalMinutes > start2TotalMinutes;
 };
+
+/**
+ * Check if a new rule overlaps with existing rules
+ */
+export const checkRuleOverlap = <T extends { id: string; day_of_week: number; start_time: string; end_time: string; is_active?: boolean }>(
+  newRule: { day_of_week: number; start_time: string; end_time: string },
+  existingRules: T[],
+  currentRuleId?: string
+): boolean => {
+  for (const existingRule of existingRules) {
+    // Skip the rule being edited and inactive rules
+    if ((currentRuleId && existingRule.id === currentRuleId) || 
+        (existingRule.is_active !== undefined && !existingRule.is_active)) {
+      continue;
+    }
+
+    // Only check rules on the same day
+    if (existingRule.day_of_week === newRule.day_of_week) {
+      // Use the canonical overlap function
+      if (areTimeIntervalsOverlapping(
+        newRule.start_time + ':00', // Add seconds if not present
+        newRule.end_time + ':00',
+        existingRule.start_time + ':00',
+        existingRule.end_time + ':00',
+        true // Allow adjacency for validation (prevent adjacent rules)
+      )) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+};
+
+/**
+ * Find the overlapping rule for detailed error messages
+ */
+export const findOverlappingRule = <T extends { id: string; day_of_week: number; start_time: string; end_time: string; is_active?: boolean }>(
+  newRule: { day_of_week: number; start_time: string; end_time: string },
+  existingRules: T[],
+  currentRuleId?: string
+): T | null => {
+  for (const existingRule of existingRules) {
+    // Skip the rule being edited and inactive rules
+    if ((currentRuleId && existingRule.id === currentRuleId) || 
+        (existingRule.is_active !== undefined && !existingRule.is_active)) {
+      continue;
+    }
+
+    // Only check rules on the same day
+    if (existingRule.day_of_week === newRule.day_of_week) {
+      // Use the canonical overlap function
+      if (areTimeIntervalsOverlapping(
+        newRule.start_time + ':00', // Add seconds if not present
+        newRule.end_time + ':00',
+        existingRule.start_time + ':00',
+        existingRule.end_time + ':00',
+        true // Allow adjacency for validation
+      )) {
+        return existingRule;
+      }
+    }
+  }
+
+  return null;
+};

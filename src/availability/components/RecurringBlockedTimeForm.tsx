@@ -73,6 +73,9 @@ export const RecurringBlockedTimeForm: React.FC<RecurringBlockedTimeFormProps> =
   const watchedStartDate = watch('start_date');
   const watchedEndDate = watch('end_date');
 
+  // Recurring blocked times are always editable (not synced from external sources)
+  const canEdit = true;
+
   // Check for overlaps with existing recurring blocks
   const isOverlapping = React.useMemo(() => {
     if (!watchedStartTime || !watchedEndTime) return false;
